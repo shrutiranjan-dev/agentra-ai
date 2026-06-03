@@ -1,0 +1,20 @@
+{
+  "name": "my-allrounder-agent",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "desktop",
+    "web",
+    "shared"
+  ],
+  "scripts": {
+    "dev:service": "cd service && go run ./cmd/service",
+    "dev:cli": "cd service && go run ./cmd/cli",
+    "dev:web": "npm run dev --workspace web",
+    "dev:desktop": "npm run dev --workspace desktop",
+    "build:web": "npm run build --workspace web",
+    "build:desktop": "npm run build --workspace desktop",
+    "typecheck": "npm run typecheck --workspace shared && npm run typecheck --workspace web && npm run typecheck --workspace desktop",
+    "test:service": "cd service && go test ./..."
+  }
+}

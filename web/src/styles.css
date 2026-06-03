@@ -1,0 +1,278 @@
+:root {
+  font-family: Inter, system-ui, sans-serif;
+  color: #e5e7eb;
+  background: #0f172a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #020617;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  height: 100vh;
+}
+
+.sidebar {
+  border-right: 1px solid #1e293b;
+  background: #0f172a;
+  padding: 16px;
+}
+
+.sidebar-header,
+.topbar,
+.toolbar,
+.modal-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.session {
+  text-align: left;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid #334155;
+  background: #111827;
+  color: white;
+}
+
+.session.active {
+  border-color: #60a5fa;
+  background: #172554;
+}
+
+.main-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.topbar {
+  padding: 20px;
+  border-bottom: 1px solid #1e293b;
+}
+
+.status-banner {
+  display: grid;
+  gap: 6px;
+  padding: 12px 20px;
+  border-bottom: 1px solid #1e293b;
+  font-size: 14px;
+}
+
+.status-banner.healthy {
+  background: rgba(16, 185, 129, 0.12);
+}
+
+.status-banner.degraded {
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.status-banner.offline {
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.toolbar {
+  justify-content: flex-end;
+}
+
+.content-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 16px;
+  padding: 16px;
+  min-height: 0;
+  flex: 1;
+  align-items: stretch;
+  overflow: hidden;
+}
+
+.chat-panel,
+.utility-panel {
+  min-height: 0;
+}
+
+.chat-panel {
+  display: grid;
+  grid-template-rows: 1fr auto;
+  gap: 16px;
+}
+
+.messages,
+.logs {
+  overflow: auto;
+}
+
+.messages {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.message,
+.card,
+.composer,
+.modal {
+  border: 1px solid #1e293b;
+  border-radius: 14px;
+  background: #0f172a;
+}
+
+.message {
+  padding: 14px;
+}
+
+.message.user {
+  border-color: #2563eb;
+}
+
+.message.assistant {
+  border-color: #10b981;
+}
+
+.message-role {
+  font-size: 12px;
+  text-transform: uppercase;
+  opacity: 0.7;
+  margin-bottom: 8px;
+}
+
+.message pre,
+.logs pre,
+.modal pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.composer {
+  padding: 12px;
+  display: grid;
+  gap: 12px;
+}
+
+.composer textarea {
+  min-height: 120px;
+  resize: vertical;
+  background: #020617;
+  color: white;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.utility-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.card {
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.logs-card {
+  flex: 1;
+  grid-template-rows: auto 1fr;
+}
+
+.logs {
+  min-height: 0;
+}
+
+.card input,
+.toolbar select {
+  background: #020617;
+  color: white;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  padding: 10px;
+}
+
+button {
+  cursor: pointer;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  padding: 10px 14px;
+  background: #1d4ed8;
+  color: white;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.75);
+  display: grid;
+  place-items: center;
+}
+
+.modal {
+  width: min(640px, 92vw);
+  padding: 20px;
+  display: grid;
+  gap: 16px;
+}
+
+.renderer-error-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.renderer-error-card {
+  width: min(880px, 96vw);
+  border: 1px solid #334155;
+  border-radius: 16px;
+  background: #0f172a;
+  padding: 24px;
+  display: grid;
+  gap: 12px;
+}
+
+.renderer-error-card pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #020617;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  padding: 12px;
+}
