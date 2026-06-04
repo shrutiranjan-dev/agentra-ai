@@ -1,0 +1,18 @@
+{
+  "go": {
+    "command": "gopls",
+    "args": []
+  },
+  "typescript": {
+    "command": "typescript-language-server",
+    "args": ["--stdio"]
+  },
+  "javascript": {
+    "command": "typescript-language-server",
+    "args": ["--stdio"]
+  },
+  "python": {
+    "command": "pylsp",
+    "args": []
+  }
+}

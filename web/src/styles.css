@@ -171,10 +171,82 @@ select {
   word-break: break-word;
 }
 
+.message-part {
+  margin: 0;
+}
+
+.message-tool,
+.message-finish {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid #334155;
+  background: #020617;
+}
+
+.message-tool.success {
+  border-color: rgba(16, 185, 129, 0.5);
+}
+
+.message-tool.error {
+  border-color: rgba(239, 68, 68, 0.5);
+}
+
 .composer {
   padding: 12px;
   display: grid;
   gap: 12px;
+}
+
+.command-palette,
+.command-list {
+  display: grid;
+  gap: 8px;
+}
+
+.command-option,
+.command-list-item {
+  text-align: left;
+  display: grid;
+  gap: 4px;
+  background: #111827;
+}
+
+.command-option span,
+.command-list-item span {
+  opacity: 0.8;
+  font-size: 13px;
+}
+
+.command-option code,
+.command-list-item code,
+.command-option small {
+  opacity: 0.75;
+  font-size: 12px;
+}
+
+.inline-fields,
+.inline-actions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.inline-actions {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.repo-summary,
+.mini-list {
+  display: grid;
+  gap: 8px;
+}
+
+.mini-list {
+  max-height: 220px;
+  overflow: auto;
 }
 
 .composer textarea {
@@ -213,12 +285,18 @@ select {
 }
 
 .card input,
-.toolbar select {
+.toolbar select,
+.card textarea {
   background: #020617;
   color: white;
   border: 1px solid #334155;
   border-radius: 10px;
   padding: 10px;
+}
+
+.card textarea {
+  min-height: 96px;
+  resize: vertical;
 }
 
 button {
@@ -245,9 +323,31 @@ button:disabled {
 
 .modal {
   width: min(640px, 92vw);
+  max-height: 90vh;
   padding: 20px;
   display: grid;
   gap: 16px;
+  overflow: auto;
+}
+
+.permission-meta {
+  margin: 0;
+  opacity: 0.85;
+}
+
+.permission-paths {
+  display: grid;
+  gap: 8px;
+}
+
+.permission-paths ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.permission-preview {
+  max-height: 280px;
+  overflow: auto;
 }
 
 .renderer-error-shell {

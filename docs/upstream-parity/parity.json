@@ -1,0 +1,314 @@
+{
+  "generatedAt": "2026-06-04T09:25:35.352Z",
+  "baselines": [
+    {
+      "id": "opencode-archive",
+      "role": "archived",
+      "repoUrl": "https://github.com/opencode-ai/opencode",
+      "localPath": "upstream/opencode-archive",
+      "ref": "archived-local-snapshot",
+      "notes": "Historical OpenCode baseline retained for provenance.",
+      "commit": "73ee493265acf15fcd8caab2bc8cd3bd375b63cb",
+      "topLevel": [
+        ".git",
+        ".github",
+        ".gitignore",
+        ".goreleaser.yml",
+        ".opencode.json",
+        "LICENSE",
+        "README.md",
+        "cmd",
+        "go.mod",
+        "go.sum",
+        "install",
+        "internal",
+        "main.go",
+        "opencode-schema.json",
+        "scripts",
+        "sqlc.yaml"
+      ]
+    },
+    {
+      "id": "crush-live",
+      "role": "live-successor",
+      "repoUrl": "https://github.com/charmbracelet/crush",
+      "localPath": "upstream/crush-live",
+      "ref": "main",
+      "notes": "Current live successor baseline for upstream parity decisions.",
+      "commit": "b688d52687100096e2c35a6c91fd1d8be75a42d7",
+      "topLevel": [
+        ".agents",
+        ".envrc",
+        ".git",
+        ".gitattributes",
+        ".github",
+        ".gitignore",
+        ".golangci.yml",
+        ".goreleaser.yml",
+        "AGENTS.md",
+        "CLA.md",
+        "LICENSE.md",
+        "README.md",
+        "Taskfile.yaml",
+        "crush.json",
+        "docs",
+        "flake.lock",
+        "flake.nix",
+        "go.mod",
+        "go.sum",
+        "internal",
+        "main.go",
+        "schema.json",
+        "scripts",
+        "sqlc.yaml"
+      ]
+    }
+  ],
+  "currentProject": {
+    "name": "my-allrounder-agent",
+    "commit": "35e0fe78f20c837fb2393908ecae0da706890df2",
+    "topLevel": [
+      ".env.example",
+      ".git",
+      ".gitignore",
+      ".opencode",
+      ".tools",
+      "PARITY.md",
+      "README.md",
+      "desktop",
+      "desktop.log",
+      "docker-compose.yml",
+      "go.work",
+      "go.work.sum",
+      "mongo-data",
+      "neo4j-data",
+      "neo4j-logs",
+      "opencode-upstream",
+      "package-lock.json",
+      "package.json",
+      "scripts",
+      "service",
+      "service.log",
+      "shared",
+      "start-dev.bat",
+      "stop-dev.bat",
+      "upstream",
+      "web",
+      "web.log"
+    ],
+    "commands": [
+      "help",
+      "status",
+      "models",
+      "new",
+      "repo",
+      "index",
+      "read",
+      "edit",
+      "patch",
+      "ls",
+      "shell",
+      "analyze",
+      "diagnostics",
+      "symbols",
+      "definition",
+      "references",
+      "mcp",
+      "compact",
+      "task"
+    ],
+    "tools": [
+      "get_status",
+      "list_files",
+      "read_file",
+      "write_file",
+      "file_edit",
+      "apply_patch",
+      "shell_exec",
+      "index_repo",
+      "analyze_path",
+      "diagnostics",
+      "lsp_symbols",
+      "lsp_definition",
+      "lsp_references",
+      "run_subtask"
+    ],
+    "facts": {
+      "desktopShell": true,
+      "localService": true,
+      "cliParity": true,
+      "ollamaOnly": true,
+      "mongoNeo4j": true,
+      "slashCommands": true,
+      "customCommands": true,
+      "approvals": true,
+      "autoCompact": true,
+      "lspDiagnostics": true,
+      "lspDefinitions": true,
+      "mcpStdio": true,
+      "nestedTasks": true,
+      "desktopCommandPalette": true,
+      "graphRetrieval": true,
+      "patchWorkflow": true
+    }
+  },
+  "capabilities": [
+    {
+      "capability": "Repo Structure and Entrypoints",
+      "status": "desktop-adapted",
+      "sourceOfTruth": "both",
+      "current": "Electron + React + Go sidecar + CLI workspace",
+      "archive": "Single Go CLI/TUI application",
+      "crush": "Single terminal-first application",
+      "notes": "Current project intentionally replaces terminal-first shell with desktop UI while keeping a CLI/debug surface."
+    },
+    {
+      "capability": "Runtime Architecture",
+      "status": "desktop-adapted",
+      "sourceOfTruth": "both",
+      "current": "Local Go sidecar with REST + WebSocket loopback",
+      "archive": "In-process terminal runtime",
+      "crush": "In-process terminal runtime",
+      "notes": "Intentional divergence for desktop-first packaging."
+    },
+    {
+      "capability": "Provider and Model Layer",
+      "status": "intentionally-different",
+      "sourceOfTruth": "both",
+      "current": "Ollama-only local models",
+      "archive": "Multi-provider",
+      "crush": "Multi-model / provider-flexible",
+      "notes": "Intentional product choice; parity target is behavior, not provider matrix."
+    },
+    {
+      "capability": "Commands and Command Discovery",
+      "status": "partial",
+      "sourceOfTruth": "archive",
+      "current": "19 built-in commands plus project/user command loading",
+      "archive": "Custom commands with named arguments",
+      "crush": "Terminal command workflows and extensible interaction model",
+      "notes": "Current custom commands are simpler than upstream named-argument behavior."
+    },
+    {
+      "capability": "Tool Loop and Approvals",
+      "status": "partial",
+      "sourceOfTruth": "both",
+      "current": "14 tool schemas with approval broker and patch/edit flow",
+      "archive": "Tool execution with approvals and file-change tracking",
+      "crush": "Tool-driven coding flow with richer terminal integration",
+      "notes": "Core loop exists, but deeper parity around orchestration and tool semantics is still pending."
+    },
+    {
+      "capability": "Sessions, History, and Compaction",
+      "status": "partial",
+      "sourceOfTruth": "both",
+      "current": "Mongo-backed sessions with degraded fallback and auto-compact summaries",
+      "archive": "SQLite-backed sessions with auto compact",
+      "crush": "Session-based workflow",
+      "notes": "Summary lineage and continuation weighting still need work."
+    },
+    {
+      "capability": "LSP Code Intelligence",
+      "status": "partial",
+      "sourceOfTruth": "crush",
+      "current": "Diagnostics, document symbols, definitions, and references",
+      "archive": "LSP integration",
+      "crush": "LSP-enhanced workspace assistance",
+      "notes": "Current implementation is file-scoped; deeper workspace parity is still missing."
+    },
+    {
+      "capability": "MCP Integration",
+      "status": "partial",
+      "sourceOfTruth": "crush",
+      "current": "stdio MCP discovery and invocation",
+      "archive": "n/a or early-era tooling",
+      "crush": "http, stdio, and sse MCP support",
+      "notes": "Current project needs broader transport parity and richer error semantics."
+    },
+    {
+      "capability": "Nested Task / Agent Behavior",
+      "status": "partial",
+      "sourceOfTruth": "archive",
+      "current": "Child-session subtask execution",
+      "archive": "Task-oriented agent model",
+      "crush": "Session-based workflows with composable context",
+      "notes": "Subtasks exist, but not yet full upstream-depth orchestration."
+    },
+    {
+      "capability": "Repo Graph and Memory Retrieval",
+      "status": "partial",
+      "sourceOfTruth": "current+crush",
+      "current": "Neo4j graph, lineage retrieval, prompt-relevant files/symbols/memories",
+      "archive": "SQLite + tracked changes + LSP context",
+      "crush": "LSP- and context-enhanced session workflow",
+      "notes": "Current project goes beyond archived storage choices but still needs stronger semantic ranking."
+    },
+    {
+      "capability": "Presentation Layer UX",
+      "status": "partial",
+      "sourceOfTruth": "both",
+      "current": "Desktop shell with command suggestions, panels, approvals, and activity cards",
+      "archive": "Bubble Tea terminal UI",
+      "crush": "Terminal-first Charm UX",
+      "notes": "Desktop adaptation is correct, but upstream-like polish and interaction density still lag."
+    }
+  ],
+  "backlog": [
+    {
+      "tranche": "Command and Config Parity",
+      "targetBehavior": "Support upstream-style named command arguments, richer command templates, and config parity across local/project/user scopes.",
+      "currentGap": "Custom commands load, but argument semantics and config parity are simpler than upstream.",
+      "subsystem": "Go command loader, shared command contracts, desktop command UI",
+      "acceptanceCriteria": "Named placeholders work end-to-end, config precedence is documented, and parity audit marks command system as matched or desktop-adapted.",
+      "sourceOfTruth": "OpenCode archive + Crush live"
+    },
+    {
+      "tranche": "Runtime and Tool Loop Parity",
+      "targetBehavior": "Match upstream tool orchestration, stop/continue semantics, and richer tool result shaping.",
+      "currentGap": "Core loop exists but deeper orchestration parity is still partial.",
+      "subsystem": "Go agent loop, tool result modeling, WebSocket event stream",
+      "acceptanceCriteria": "Tool calls, denials, retries, and completions render consistently and match audit expectations.",
+      "sourceOfTruth": "OpenCode archive + Crush live"
+    },
+    {
+      "tranche": "Approval and Edit-Flow Parity",
+      "targetBehavior": "Provide upstream-grade approval semantics and diff-aware mutation review.",
+      "currentGap": "Approvals and patching are strong but not fully upstream-equivalent.",
+      "subsystem": "Approval broker, desktop approval UI, patch/edit engine",
+      "acceptanceCriteria": "Approvals expose intent, affected files, and diff previews for all risky mutations.",
+      "sourceOfTruth": "OpenCode archive"
+    },
+    {
+      "tranche": "LSP and MCP Parity",
+      "targetBehavior": "Expand from current file-scoped LSP and stdio-only MCP to richer upstream behavior.",
+      "currentGap": "Definitions/references exist, but workspace depth and MCP transport breadth are still partial.",
+      "subsystem": "LSP client, MCP client, tool schema exposure, desktop diagnostics panels",
+      "acceptanceCriteria": "Parity audit upgrades LSP and MCP classifications and documents supported transports/capabilities.",
+      "sourceOfTruth": "Crush live"
+    },
+    {
+      "tranche": "Graph, Memory, and Retrieval Parity",
+      "targetBehavior": "Use graph and session lineage to influence answers with stronger semantic ranking and symbol/reference relationships.",
+      "currentGap": "Lineage-aware retrieval exists, but symbol/reference graph semantics remain shallow.",
+      "subsystem": "Neo4j store, repo indexer, prompt context builder",
+      "acceptanceCriteria": "Repo graph stores true symbol/reference relationships and retrieval is traceably better across follow-up tasks.",
+      "sourceOfTruth": "Current project + Crush live"
+    },
+    {
+      "tranche": "Nested Task and Continuation Parity",
+      "targetBehavior": "Bring subtask and compaction behavior closer to upstream continuation semantics.",
+      "currentGap": "Child sessions exist, but summary lineage and nested-task behavior are still partial.",
+      "subsystem": "Session model, compaction flow, memory/session linking",
+      "acceptanceCriteria": "Parent/subtask context continues predictably after compaction and is surfaced in audit outputs.",
+      "sourceOfTruth": "OpenCode archive"
+    },
+    {
+      "tranche": "Desktop UX Parity",
+      "targetBehavior": "Preserve upstream information architecture in a desktop-native interface.",
+      "currentGap": "Desktop UX is solid but still less polished and less dense than upstream terminal flows.",
+      "subsystem": "React desktop renderer, command palette, activity stream, session panels",
+      "acceptanceCriteria": "Audit classifies presentation parity as desktop-adapted with no major missing interaction patterns.",
+      "sourceOfTruth": "OpenCode archive + Crush live"
+    }
+  ]
+}

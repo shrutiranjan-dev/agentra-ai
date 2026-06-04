@@ -1,0 +1,19 @@
+{
+  "defaults": {
+    "model": "llama3.1"
+  },
+  "integrations": {
+    "lspConfigPath": "./lsp.json",
+    "mcpConfigPath": "./mcp.json"
+  },
+  "compact": {
+    "enabled": true,
+    "messageLimit": 24,
+    "preserveRecent": 8
+  },
+  "commands": {
+    "directories": [
+      "./commands"
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "servers": {
+    "example-stdio": {
+      "transport": "stdio",
+      "command": "node",
+      "args": ["path/to/mcp-server.js"],
+      "env": {}
+    },
+    "example-http": {
+      "transport": "http",
+      "url": "http://127.0.0.1:9000/mcp",
+      "headers": {}
+    }
+  }
+}

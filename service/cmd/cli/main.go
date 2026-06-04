@@ -40,7 +40,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	message, err := runtimeApp.RunAgent(ctx, session.ID, *model, *prompt)
+	message, err := runtimeApp.RunAgent(ctx, session.ID, *model, *prompt, "")
 	if err != nil {
 		log.Fatal(err)
 	}

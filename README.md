@@ -65,6 +65,98 @@ Direct browser access to `http://localhost:5173/` is supported, but it must be c
 - `VITE_APP_AUTH_TOKEN` must match the backend `APP_AUTH_TOKEN`
 - Electron does not rely on these browser env vars because it receives auth through preload/runtime config
 
+## LSP, MCP, and auto-compact
+
+- `LSP_CONFIG_PATH` defaults to `.opencode/lsp.json`
+- `MCP_CONFIG_PATH` defaults to `.opencode/mcp.json`
+- `.opencode/config.json.example` shows optional user/project config overlays
+- example files are included at `.opencode/lsp.json.example` and `.opencode/mcp.json.example`
+- `AUTO_COMPACT=true` enables conversation compaction
+- `AUTO_COMPACT_MESSAGE_LIMIT` controls when older conversation turns are summarized
+- `AUTO_COMPACT_PRESERVE_RECENT` controls how many recent messages stay uncompressed
+
+Config precedence:
+
+1. environment variables
+2. `%USERPROFILE%\.opencode\config.json`
+3. `<repo>\.opencode\config.json`
+
+The config overlay can override:
+
+- default model
+- LSP config path
+- MCP config path
+- auto-compact behavior
+- extra custom command directories
+
+MCP transport support in this desktop runtime:
+
+- `stdio` supported
+- `http` supported for JSON-RPC style MCP endpoints
+- `sse` reported clearly as not yet supported
+
+New built-in commands:
+
+- `/diagnostics <file-path>` runs LSP diagnostics for a file
+- `/symbols <file-path>` lists LSP document symbols
+- `/workspace-symbols [query]` searches symbols across the active repository
+- `/definition <path> <line> <character>` finds an LSP definition
+- `/references <path> <line> <character>` finds LSP references
+- `/mcp` lists configured MCP tools
+- `/mcp-status` shows MCP server reachability and transport details
+- `/compact` forces a session compaction pass
+- `/task [title] ::: <prompt>` runs a focused subtask in a child session
+- `/edit <path> ::: <search> ::: <replace>` applies a single exact edit
+- `/patch <path>` accepts SEARCH/REPLACE blocks on following lines
+- `apply_patch` also accepts `*** Begin Patch` envelopes with `*** Update File:`, `*** Add File:`, and `*** Delete File:` sections
+- the desktop utility column now shows diagnostics results, MCP-discovered tools, live tool activity, and repo graph context
+- the desktop utility column now also shows workspace symbol search, MCP server status, LSP code-intel results, and a subtask runner
+- the desktop utility column now also exposes direct file edit and patch testing
+- patch approvals now include affected paths plus diff-style previews
+- `apply_patch` can target multiple files when the patch body includes `*** FILE: <path>` sections
+- the tool activity panel now shows richer per-tool status, path, summary, and output details
+- the desktop utility column now also shows a retrieval preview with ranked files, symbols, memories, and snippets for the current prompt
+
+The agent tool loop can also call:
+
+- `diagnostics`
+- configured MCP tools discovered from `.opencode/mcp.json`
+
+## Custom command format
+
+Custom commands load from:
+
+- `%USERPROFILE%\.opencode\commands\`
+- `<repo>\.opencode\commands\`
+- any extra directories listed in `.opencode/config.json`
+
+Supported template placeholders:
+
+- `$ARGUMENTS`
+- `$1`, `$2`, ...
+- `{{path}}`
+- `{{focus|default}}`
+- `$path`
+- `${path}`
+
+Supported invocation styles:
+
+- `/project:review --path src/app.ts --focus auth`
+- `/project:review --path=src/app.ts`
+- `/project:review path=src/app.ts`
+
+Optional frontmatter:
+
+```md
+---
+title: Review File
+description: Review a file with extra context
+arg: path|required|Path to inspect
+arg: focus|optional|Focus area|tests
+---
+Please review {{path}} with focus {{focus|general}}.
+```
+
 ## Troubleshooting
 
 - `bind: Only one usage of each socket address...`
@@ -105,13 +197,28 @@ The Go service reads:
 
 ## Current implementation status
 
-This first pass delivers the platform scaffold and working core:
+This repo now delivers a stronger OpenCode-style desktop core:
 
 - shared API/event contracts
 - Electron + React desktop shell
-- Go runtime with REST, WebSocket, session APIs, approval APIs, Ollama model listing, chat streaming, CLI prompt mode
+- Go runtime with REST, WebSocket, session APIs, approval APIs, Ollama model listing, slash commands, tool-aware agent execution, and CLI prompt mode
 - MongoDB persistence for sessions/messages/approvals/tool runs/settings
 - Neo4j wiring for repo/memory indexing primitives
+- Neo4j session graph links for parent/child subtasks and session-linked memories
 - Docker Compose for MongoDB + Neo4j
+- pasted-path analysis for local files and repositories
+- desktop command discovery for built-in and `.opencode/commands` custom commands
+- LSP diagnostics tool integration
+- LSP document symbols, definitions, and references endpoints
+- MCP stdio tool discovery and invocation
+- auto-compact summary generation for long sessions
+- child-session subtask execution for focused nested runs
+- session-aware retrieval that blends lineage memories, touched files, and repo context into prompts
+- ranked retrieval preview that explains why files, symbols, and memories were selected for prompt context
+- desktop panels for tool activity, diagnostics visibility, MCP inventory, and repo graph summary
+- repo indexing now stores file metadata, directory relationships, and simple import edges for better context injection
+- repo indexing now also stores file-to-file reference edges resolved from local imports
+- repo indexing now also stores simple symbols and injects prompt-relevant code snippets into agent context
+- edit/apply-patch runtime for safer file mutations, multi-file patching, `Begin Patch`-style envelopes, diff previews, and richer tool result/activity rendering
 
-Advanced tool execution, full OpenCode-level patching flows, and deep LSP execution are scaffolded for extension rather than fully complete in this initial pass.
+See `PARITY.md` for the live parity matrix, including what is implemented, partially implemented, and still missing for deeper OpenCode behavioral parity.

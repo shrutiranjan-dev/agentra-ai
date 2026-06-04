@@ -1,9 +1,21 @@
 import type {
   ApiErrorResponse,
+  CommandDefinition,
+  CommandResult,
+  CodeIntelLocation,
+  DiagnosticResult,
+  DocumentSymbolResult,
   Message,
+  MCPServerStatus,
+  MCPToolInfo,
   PermissionRequest,
+  RepoGraphSummary,
+  RepoRetrievalPreview,
   ServiceStatus,
+  SubtaskResult,
   Session
+  ,
+  WorkspaceSymbolResult
 } from "@assistant/shared";
 
 export class StatusFetchError extends Error {
@@ -113,13 +125,30 @@ export async function listMessages(sessionId: string): Promise<Message[]> {
   return parseJSONOrThrow<Message[]>(response);
 }
 
-export async function runAgent(sessionId: string, prompt: string, model: string) {
+export async function runAgent(sessionId: string, prompt: string, model: string, repoPath?: string) {
   const response = await fetch(`${resolvedBaseUrl}/api/agent/run`, {
     method: "POST",
     headers: headers(),
-    body: JSON.stringify({ sessionId, prompt, model })
+    body: JSON.stringify({ sessionId, prompt, model, repoPath })
   });
   return parseJSONOrThrow<Message>(response);
+}
+
+export async function listCommands(repoPath?: string): Promise<CommandDefinition[]> {
+  const suffix = repoPath ? `?repoPath=${encodeURIComponent(repoPath)}` : "";
+  const response = await fetch(`${resolvedBaseUrl}/api/commands${suffix}`, {
+    headers: headers()
+  });
+  return parseJSONOrThrow<CommandDefinition[]>(response);
+}
+
+export async function runCommand(sessionId: string, model: string, input: string, repoPath?: string): Promise<CommandResult> {
+  const response = await fetch(`${resolvedBaseUrl}/api/commands/run`, {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({ sessionId, model, input, repoPath })
+  });
+  return parseJSONOrThrow<CommandResult>(response);
 }
 
 export async function listModels(): Promise<Array<{ name: string }>> {
@@ -147,6 +176,24 @@ export async function runShell(sessionId: string, command: string, cwd: string) 
   return parseJSONOrThrow<{ output?: string; error?: string }>(response);
 }
 
+export async function editFile(sessionId: string, path: string, oldText: string, newText: string, replaceAll = false) {
+  const response = await fetch(`${resolvedBaseUrl}/api/files/edit`, {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({ sessionId, path, oldText, newText, replaceAll })
+  });
+  return parseJSONOrThrow<{ output: string }>(response);
+}
+
+export async function applyPatch(sessionId: string, path: string | undefined, patch: string) {
+  const response = await fetch(`${resolvedBaseUrl}/api/files/patch`, {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({ sessionId, path, patch })
+  });
+  return parseJSONOrThrow<{ output: string }>(response);
+}
+
 export async function indexRepo(repoPath: string) {
   const response = await fetch(`${resolvedBaseUrl}/api/repo/index`, {
     method: "POST",
@@ -154,6 +201,108 @@ export async function indexRepo(repoPath: string) {
     body: JSON.stringify({ repoPath })
   });
   return parseJSONOrThrow<{ started: boolean }>(response);
+}
+
+export async function getDiagnostics(path: string, repoPath?: string): Promise<DiagnosticResult[]> {
+  const query = new URLSearchParams({ path });
+  if (repoPath) {
+    query.set("repoPath", repoPath);
+  }
+  const response = await fetch(`${resolvedBaseUrl}/api/diagnostics?${query.toString()}`, {
+    headers: headers()
+  });
+  return parseJSONOrThrow<DiagnosticResult[]>(response);
+}
+
+export async function getDocumentSymbols(path: string, repoPath?: string): Promise<DocumentSymbolResult[]> {
+  const query = new URLSearchParams({ path });
+  if (repoPath) {
+    query.set("repoPath", repoPath);
+  }
+  const response = await fetch(`${resolvedBaseUrl}/api/lsp/symbols?${query.toString()}`, {
+    headers: headers()
+  });
+  return parseJSONOrThrow<DocumentSymbolResult[]>(response);
+}
+
+export async function getDefinitions(path: string, line: number, character: number, repoPath?: string): Promise<CodeIntelLocation[]> {
+  const query = new URLSearchParams({ path, line: String(line), character: String(character) });
+  if (repoPath) {
+    query.set("repoPath", repoPath);
+  }
+  const response = await fetch(`${resolvedBaseUrl}/api/lsp/definition?${query.toString()}`, {
+    headers: headers()
+  });
+  return parseJSONOrThrow<CodeIntelLocation[]>(response);
+}
+
+export async function getReferences(path: string, line: number, character: number, repoPath?: string): Promise<CodeIntelLocation[]> {
+  const query = new URLSearchParams({ path, line: String(line), character: String(character) });
+  if (repoPath) {
+    query.set("repoPath", repoPath);
+  }
+  const response = await fetch(`${resolvedBaseUrl}/api/lsp/references?${query.toString()}`, {
+    headers: headers()
+  });
+  return parseJSONOrThrow<CodeIntelLocation[]>(response);
+}
+
+export async function getWorkspaceSymbols(repoPath: string, query?: string): Promise<WorkspaceSymbolResult[]> {
+  const params = new URLSearchParams({ repoPath });
+  if (query) {
+    params.set("query", query);
+  }
+  const response = await fetch(`${resolvedBaseUrl}/api/lsp/workspace-symbols?${params.toString()}`, {
+    headers: headers()
+  });
+  return parseJSONOrThrow<WorkspaceSymbolResult[]>(response);
+}
+
+export async function listMCPTools(repoPath?: string): Promise<MCPToolInfo[]> {
+  const suffix = repoPath ? `?repoPath=${encodeURIComponent(repoPath)}` : "";
+  const response = await fetch(`${resolvedBaseUrl}/api/mcp/tools${suffix}`, {
+    headers: headers()
+  });
+  return parseJSONOrThrow<MCPToolInfo[]>(response);
+}
+
+export async function getMCPServerStatuses(repoPath?: string): Promise<MCPServerStatus[]> {
+  const suffix = repoPath ? `?repoPath=${encodeURIComponent(repoPath)}` : "";
+  const response = await fetch(`${resolvedBaseUrl}/api/mcp/status${suffix}`, {
+    headers: headers()
+  });
+  return parseJSONOrThrow<MCPServerStatus[]>(response);
+}
+
+export async function getRepoContext(repoPath: string, sessionId?: string): Promise<RepoGraphSummary> {
+  const query = new URLSearchParams({ repoPath });
+  if (sessionId) {
+    query.set("sessionId", sessionId);
+  }
+  const response = await fetch(`${resolvedBaseUrl}/api/repo/context?${query.toString()}`, {
+    headers: headers()
+  });
+  return parseJSONOrThrow<RepoGraphSummary>(response);
+}
+
+export async function getRepoRetrievalPreview(repoPath: string, prompt: string, sessionId?: string): Promise<RepoRetrievalPreview> {
+  const query = new URLSearchParams({ repoPath, prompt });
+  if (sessionId) {
+    query.set("sessionId", sessionId);
+  }
+  const response = await fetch(`${resolvedBaseUrl}/api/repo/retrieval?${query.toString()}`, {
+    headers: headers()
+  });
+  return parseJSONOrThrow<RepoRetrievalPreview>(response);
+}
+
+export async function runSubtask(sessionId: string, model: string, prompt: string, title: string, repoPath?: string): Promise<SubtaskResult> {
+  const response = await fetch(`${resolvedBaseUrl}/api/agent/subtask`, {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({ sessionId, model, prompt, title, repoPath })
+  });
+  return parseJSONOrThrow<SubtaskResult>(response);
 }
 
 export function connectEvents(onEvent: (event: { type: string; data: any }) => void) {

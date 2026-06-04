@@ -1,0 +1,20 @@
+{
+  "baselines": [
+    {
+      "id": "opencode-archive",
+      "role": "archived",
+      "repoUrl": "https://github.com/opencode-ai/opencode",
+      "localPath": "upstream/opencode-archive",
+      "ref": "archived-local-snapshot",
+      "notes": "Historical OpenCode baseline retained for provenance."
+    },
+    {
+      "id": "crush-live",
+      "role": "live-successor",
+      "repoUrl": "https://github.com/charmbracelet/crush",
+      "localPath": "upstream/crush-live",
+      "ref": "main",
+      "notes": "Current live successor baseline for upstream parity decisions."
+    }
+  ]
+}

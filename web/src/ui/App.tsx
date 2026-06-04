@@ -1,16 +1,45 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { Message, PermissionRequest, ServiceStatus, Session } from "@assistant/shared";
+import type {
+  CodeIntelLocation,
+  CommandDefinition,
+  DiagnosticResult,
+  DocumentSymbolResult,
+  MCPServerStatus,
+  MCPToolInfo,
+  Message,
+  PermissionRequest,
+  RepoGraphSummary,
+  RepoRetrievalPreview,
+  ServiceStatus,
+  Session,
+  ToolActivity,
+  WorkspaceSymbolResult
+} from "@assistant/shared";
 import {
+  applyPatch,
   connectEvents,
   createSession,
   decidePermission,
+  editFile,
+  getDefinitions,
+  getDiagnostics,
+  getDocumentSymbols,
+  getMCPServerStatuses,
+  getRepoContext,
+  getRepoRetrievalPreview,
+  getReferences,
   getServiceStatus,
+  getWorkspaceSymbols,
   indexRepo,
+  listMCPTools,
+  listCommands,
   listMessages,
   listModels,
   listSessions,
   ProtectedApiAuthError,
   runAgent,
+  runCommand,
+  runSubtask,
   runShell
 } from "../api/client";
 
@@ -29,9 +58,97 @@ function extractText(message: Message) {
       if (part.type === "text" || part.type === "reasoning") {
         return part.text;
       }
+      if (part.type === "tool_result") {
+        return part.content;
+      }
       return "";
     })
     .join("");
+}
+
+function renderMessageParts(message: Message) {
+  return message.parts.map((part, index) => {
+    if (part.type === "text" || part.type === "reasoning") {
+      return (
+        <pre key={`${message.id}-${index}`} className="message-part">
+          {part.text}
+        </pre>
+      );
+    }
+    if (part.type === "tool_call") {
+      return (
+        <div key={`${message.id}-${index}`} className="message-tool message-tool-call">
+          <strong>Tool call: {part.name}</strong>
+          <span>Status: {part.status}</span>
+          <pre>{part.input}</pre>
+        </div>
+      );
+    }
+    if (part.type === "tool_result") {
+      return (
+        <div key={`${message.id}-${index}`} className={`message-tool ${part.isError ? "error" : "success"}`}>
+          <strong>Tool result: {part.name ?? part.toolCallId}</strong>
+          {part.path && <span>Path: {part.path}</span>}
+          <pre>{part.content}</pre>
+        </div>
+      );
+    }
+    if (part.type === "finish") {
+      return (
+        <div key={`${message.id}-${index}`} className="message-finish">
+          finish: {part.reason}
+        </div>
+      );
+    }
+    return null;
+  });
+}
+
+function safePaths(request: PermissionRequest | null) {
+  if (!request) {
+    return [];
+  }
+  const fromList = Array.isArray(request.paths) ? request.paths : [];
+  if (fromList.length > 0) {
+    return fromList;
+  }
+  return request.path ? [request.path] : [];
+}
+
+function formatTimestamp(epochSeconds?: number) {
+  if (!epochSeconds) {
+    return "";
+  }
+  return new Date(epochSeconds * 1000).toLocaleTimeString();
+}
+
+function renderToolActivity(item: ToolActivity) {
+  const statusClass =
+    item.status === "failed" || item.status === "denied"
+      ? "error"
+      : item.status === "completed" || item.status === "approved"
+        ? "success"
+        : "message-tool-call";
+  return (
+    <div key={item.toolCallId} className={`message-tool ${item.isError ? "error" : statusClass}`}>
+      <strong>{item.toolName}</strong>
+      <span>
+        {item.status.toUpperCase()}
+        {item.path ? ` · ${item.path}` : ""}
+        {item.startedAt ? ` · ${formatTimestamp(item.completedAt ?? item.startedAt)}` : ""}
+      </span>
+      {item.summary && <pre>{item.summary}</pre>}
+      {item.output && <pre>{item.output}</pre>}
+    </div>
+  );
+}
+
+function buildCommandPrompt(command: CommandDefinition) {
+  const requiredArgs = safeArray(command.arguments).filter((item) => item.required);
+  if (requiredArgs.length === 0) {
+    return `/${command.id} `;
+  }
+  return `/${command.id} ${requiredArgs.map((item) => `--${item.name} `).join("")}`;
 }
 
 function initialStatus(runtimeBootStatus: string, runtimeBootMessage: string): ServiceStatus {
@@ -78,12 +195,36 @@ export function App() {
   const [selectedSessionId, setSelectedSessionId] = useState<string>("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [models, setModels] = useState<Array<{ name: string }>>([]);
+  const [commands, setCommands] = useState<CommandDefinition[]>([]);
   const [model, setModel] = useState("llama3.1");
   const [prompt, setPrompt] = useState("");
   const [shellCommand, setShellCommand] = useState("pwd");
+  const [editPath, setEditPath] = useState("");
+  const [editSearch, setEditSearch] = useState("");
+  const [editReplace, setEditReplace] = useState("");
+  const [patchPath, setPatchPath] = useState("");
+  const [patchText, setPatchText] = useState("");
+  const [diagnosticPath, setDiagnosticPath] = useState("");
+  const [symbolPath, setSymbolPath] = useState("");
+  const [workspaceSymbolQuery, setWorkspaceSymbolQuery] = useState("");
+  const [codeIntelLine, setCodeIntelLine] = useState("1");
+  const [codeIntelCharacter, setCodeIntelCharacter] = useState("1");
+  const [subtaskTitle, setSubtaskTitle] = useState("Subtask");
+  const [subtaskPrompt, setSubtaskPrompt] = useState("");
   const [repoPath, setRepoPath] = useState("");
   const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
+  const [runtimeEvents, setRuntimeEvents] = useState<string[]>([]);
+  const [toolActivities, setToolActivities] = useState<ToolActivity[]>([]);
+  const [diagnostics, setDiagnostics] = useState<DiagnosticResult[]>([]);
+  const [documentSymbols, setDocumentSymbols] = useState<DocumentSymbolResult[]>([]);
+  const [workspaceSymbols, setWorkspaceSymbols] = useState<WorkspaceSymbolResult[]>([]);
+  const [definitions, setDefinitions] = useState<CodeIntelLocation[]>([]);
+  const [references, setReferences] = useState<CodeIntelLocation[]>([]);
+  const [mcpTools, setMCPTools] = useState<MCPToolInfo[]>([]);
+  const [mcpServerStatuses, setMCPServerStatuses] = useState<MCPServerStatus[]>([]);
+  const [repoContext, setRepoContext] = useState<RepoGraphSummary | null>(null);
+  const [retrievalPreview, setRetrievalPreview] = useState<RepoRetrievalPreview | null>(null);
   const [bootPhase, setBootPhase] = useState<BootPhase>(
     runtimeBootStatus === "healthy" ? "healthy" : runtimeBootStatus === "degraded" ? "degraded" : "loading"
   );
@@ -94,13 +235,44 @@ export function App() {
   const safeSessions = safeArray(sessions);
   const safeMessages = safeArray(messages);
   const safeModels = safeArray(models);
+  const safeCommands = safeArray(commands);
   const safeStatusMessages = safeArray(serviceStatus.messages);
   const safeLogs = safeArray(logs);
+  const safeRuntimeEvents = safeArray(runtimeEvents);
+  const safeToolActivities = safeArray(toolActivities);
+  const safeDiagnostics = safeArray(diagnostics);
+  const safeDocumentSymbols = safeArray(documentSymbols);
+  const safeWorkspaceSymbols = safeArray(workspaceSymbols);
+  const safeDefinitions = safeArray(definitions);
+  const safeReferences = safeArray(references);
+  const safeMCPTools = safeArray(mcpTools);
+  const safeMCPServerStatuses = safeArray(mcpServerStatuses);
+  const permissionPaths = safePaths(pendingPermission);
+  const safeRetrievalFileMatches = safeArray(retrievalPreview?.fileMatches);
+  const safeRetrievalMemoryMatches = safeArray(retrievalPreview?.memoryMatches);
+  const safeRetrievalSymbolMatches = safeArray(retrievalPreview?.symbolMatches);
+  const safeRetrievalSnippets = safeArray(retrievalPreview?.snippets);
 
   const selectedSession = useMemo(
     () => safeSessions.find((item) => item.id === selectedSessionId) ?? null,
     [safeSessions, selectedSessionId]
   );
+
+  const commandMatches = useMemo(() => {
+    const trimmed = prompt.trim();
+    if (!trimmed.startsWith("/")) {
+      return [];
+    }
+    const query = trimmed.slice(1).toLowerCase();
+    return safeCommands
+      .filter((command: CommandDefinition) =>
+        command.id.toLowerCase().includes(query) ||
+        command.title.toLowerCase().includes(query) ||
+        command.description.toLowerCase().includes(query) ||
+        safeArray(command.arguments).some((item) => item.name.toLowerCase().includes(query))
+      )
+      .slice(0, 8);
+  }, [prompt, safeCommands]);
 
   function pushLog(entry: string) {
     setLogs((current) => {
@@ -109,6 +281,16 @@ export function App() {
         return safeCurrent;
       }
       return [entry, ...safeCurrent].slice(0, 100);
+    });
+  }
+
+  function pushRuntimeEvent(entry: string) {
+    setRuntimeEvents((current) => {
+      const safeCurrent = Array.isArray(current) ? current : [];
+      if (safeCurrent[0] === entry) {
+        return safeCurrent;
+      }
+      return [entry, ...safeCurrent].slice(0, 40);
     });
   }
 
@@ -182,6 +364,25 @@ export function App() {
       }
     }
 
+    async function loadCommandsIfAvailable(status: ServiceStatus) {
+      if (!status.serviceHealthy) {
+        setCommands([]);
+        return;
+      }
+
+      try {
+        const commandData = safeArray(await listCommands(repoPath));
+        if (disposed) return;
+        setCommands(commandData);
+      } catch (error) {
+        if (disposed) return;
+        if (error instanceof ProtectedApiAuthError) {
+          return;
+        }
+        pushLog(`commands unavailable: ${(error as Error).message}`);
+      }
+    }
+
     async function refreshStatusLoop() {
       setBootPhase((current) => (current === "offline" ? "loading" : current));
 
@@ -199,7 +400,7 @@ export function App() {
           if (status.serviceHealthy && authPhase === "unknown") {
             setAuthMessage("");
           }
-          await Promise.all([loadSessionsIfAvailable(status), loadModelsIfAvailable(status)]);
+          await Promise.all([loadSessionsIfAvailable(status), loadModelsIfAvailable(status), loadCommandsIfAvailable(status)]);
           return;
         } catch (error) {
           if (disposed) return;
@@ -229,7 +430,68 @@ export function App() {
       disposed = true;
       window.clearInterval(poll);
     };
-  }, [authPhase]);
+  }, [authPhase, repoPath]);
+
+  useEffect(() => {
+    if (!repoPath || !serviceStatus.serviceHealthy || authPhase !== "ready") {
+      setDiagnostics([]);
+      setWorkspaceSymbols([]);
+      setMCPTools([]);
+      setMCPServerStatuses([]);
+      setRepoContext(null);
+      setRetrievalPreview(null);
+      return;
+    }
+
+    let disposed = false;
+    void (async () => {
+      try {
+        const [tools, statuses, context] = await Promise.all([
+          listMCPTools(repoPath).catch(() => []),
+          getMCPServerStatuses(repoPath).catch(() => []),
+          getRepoContext(repoPath, selectedSessionId || undefined).catch(() => null)
+        ]);
+        if (disposed) return;
+        setMCPTools(safeArray<MCPToolInfo>(tools));
+        setMCPServerStatuses(safeArray<MCPServerStatus>(statuses));
+        setRepoContext(context);
+      } catch (error) {
+        if (disposed) return;
+        pushLog(`repo metadata unavailable: ${(error as Error).message}`);
+      }
+    })();
+
+    return () => {
+      disposed = true;
+    };
+  }, [authPhase, repoPath, selectedSessionId, serviceStatus.serviceHealthy]);
+
+  useEffect(() => {
+    if (!repoPath || !prompt.trim() || !serviceStatus.serviceHealthy || authPhase !== "ready") {
+      setRetrievalPreview(null);
+      return;
+    }
+
+    let disposed = false;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const preview = await getRepoRetrievalPreview(repoPath, prompt.trim(), selectedSessionId || undefined);
+          if (disposed) return;
+          setRetrievalPreview(preview);
+        } catch (error) {
+          if (disposed) return;
+          pushLog(`retrieval preview unavailable: ${(error as Error).message}`);
+          setRetrievalPreview(null);
+        }
+      })();
+    }, 350);
+
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, [authPhase, prompt, repoPath, selectedSessionId, serviceStatus.serviceHealthy]);
 
   useEffect(() => {
     if ((bootPhase !== "healthy" && bootPhase !== "degraded") || authPhase !== "ready") {
@@ -245,6 +507,31 @@ export function App() {
     }
 
     const socket = connectEvents((event) => {
+      if (event.type === "run.status") {
+        const payload = event.data as {
+          sessionId: string;
+          runId: string;
+          status: string;
+          message?: string;
+          toolName?: string;
+          continuation?: { summaryMessageId?: string; compactedMessages?: number; recentMessages?: number } | null;
+          subtask?: { title?: string; childSessionId?: string; status?: string } | null;
+          time: number;
+        };
+        const details = [
+          payload.status,
+          payload.toolName ? `tool=${payload.toolName}` : "",
+          payload.message ?? "",
+          payload.continuation?.summaryMessageId
+            ? `summary=${payload.continuation.summaryMessageId} compacted=${payload.continuation.compactedMessages ?? 0} recent=${payload.continuation.recentMessages ?? 0}`
+            : "",
+          payload.subtask?.childSessionId ? `subtask=${payload.subtask.title ?? payload.subtask.childSessionId}` : ""
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        pushRuntimeEvent(details);
+      }
+
       if (event.type === "message.delta") {
         const payload = event.data as { messageId: string; delta: string };
         setMessages((current) =>
@@ -273,9 +560,151 @@ export function App() {
         setPendingPermission(event.data as PermissionRequest);
       }
 
+      if (event.type === "approval.updated") {
+        const payload = event.data as {
+          requestId: string;
+          sessionId: string;
+          runId?: string;
+          toolCallId?: string;
+          toolName: string;
+          status: ToolActivity["status"] | "allow_once" | "allow_session" | "timeout" | "deny";
+          path?: string;
+        };
+        const normalizedStatus =
+          payload.status === "allow_once" || payload.status === "allow_session"
+            ? "approved"
+            : payload.status === "deny"
+              ? "denied"
+              : payload.status === "timeout"
+                ? "failed"
+                : payload.status;
+        if (payload.toolCallId) {
+          setToolActivities((current) => {
+            const existing = safeArray(current);
+            const found = existing.find((item) => item.toolCallId === payload.toolCallId);
+            const updated: ToolActivity = {
+              sessionId: payload.sessionId,
+              runId: payload.runId,
+              toolCallId: payload.toolCallId!,
+              toolName: payload.toolName,
+              status: normalizedStatus as ToolActivity["status"],
+              path: payload.path ?? found?.path,
+              input: found?.input,
+              summary: found?.summary,
+              output: found?.output,
+              isError: normalizedStatus === "denied" || normalizedStatus === "failed",
+              startedAt: found?.startedAt,
+              completedAt: found?.completedAt
+            };
+            return [updated, ...existing.filter((item) => item.toolCallId !== payload.toolCallId)].slice(0, 30);
+          });
+        }
+        pushRuntimeEvent(`${payload.toolName} approval ${normalizedStatus}${payload.path ? ` · ${payload.path}` : ""}`);
+      }
+
+      if (event.type === "tool.lifecycle") {
+        const payload = event.data as {
+          sessionId: string;
+          runId?: string;
+          toolCallId: string;
+          toolName: string;
+          status: ToolActivity["status"];
+          path?: string;
+          input?: string;
+          summary?: string;
+          output?: string;
+          isError?: boolean;
+          time: number;
+        };
+        setToolActivities((current) => {
+          const existing = safeArray(current);
+          const found = existing.find((item) => item.toolCallId === payload.toolCallId);
+          const updated: ToolActivity = {
+            sessionId: payload.sessionId,
+            runId: payload.runId,
+            toolCallId: payload.toolCallId,
+            toolName: payload.toolName,
+            status: payload.status,
+            path: payload.path ?? found?.path,
+            input: payload.input ?? found?.input,
+            summary: payload.summary ?? found?.summary,
+            output: payload.output ?? found?.output,
+            isError: payload.isError ?? found?.isError,
+            startedAt: found?.startedAt ?? payload.time,
+            completedAt: payload.status === "completed" || payload.status === "failed" || payload.status === "denied" ? payload.time : found?.completedAt
+          };
+          return [updated, ...existing.filter((item) => item.toolCallId !== payload.toolCallId)].slice(0, 30);
+        });
+      }
+
+      if (event.type === "tool.started") {
+        const payload = event.data as {
+          sessionId: string;
+          runId?: string;
+          toolCallId: string;
+          toolName: string;
+          path?: string;
+          input?: string;
+          summary?: string;
+          startedAt?: number;
+        };
+        setToolActivities((current) => {
+          const started: ToolActivity = {
+            sessionId: payload.sessionId,
+            runId: payload.runId,
+            toolCallId: payload.toolCallId,
+            toolName: payload.toolName,
+            status: "running",
+            path: payload.path,
+            input: payload.input,
+            summary: payload.summary,
+            startedAt: payload.startedAt
+          };
+          return [started, ...safeArray<ToolActivity>(current).filter((item) => item.toolCallId !== payload.toolCallId)].slice(0, 30);
+        });
+      }
+
+      if (event.type === "tool.completed") {
+        const payload = event.data as {
+          sessionId: string;
+          runId?: string;
+          toolCallId: string;
+          toolName?: string;
+          path?: string;
+          output: string;
+          isError: boolean;
+          summary?: string;
+          completedAt?: number;
+        };
+        setToolActivities((current) => {
+          const existing = safeArray(current);
+          const found = existing.find((item) => item.toolCallId === payload.toolCallId);
+          const updated: ToolActivity = {
+            sessionId: payload.sessionId,
+            runId: payload.runId,
+            toolCallId: payload.toolCallId,
+            toolName: payload.toolName ?? found?.toolName ?? "tool",
+            status: payload.isError ? "failed" : "completed",
+            path: payload.path ?? found?.path,
+            input: found?.input,
+            summary: payload.summary ?? found?.summary,
+            output: payload.output,
+            isError: payload.isError,
+            startedAt: found?.startedAt,
+            completedAt: payload.completedAt
+          };
+          return [updated, ...existing.filter((item) => item.toolCallId !== payload.toolCallId)].slice(0, 30);
+        });
+      }
+
       if (event.type === "repo.index.status") {
         const payload = event.data as { state: string; indexedFiles?: number; message?: string };
         pushLog(`repo index: ${payload.state} ${payload.indexedFiles ?? ""} ${payload.message ?? ""}`.trim());
+        if (repoPath && payload.state === "complete") {
+          void getRepoContext(repoPath)
+            .then((context) => setRepoContext(context))
+            .catch((error) => pushLog(`repo context unavailable: ${(error as Error).message}`));
+        }
       }
 
       if (event.type === "log") {
@@ -342,7 +771,11 @@ export function App() {
     }
     const nextPrompt = prompt;
     setPrompt("");
-    await runAgent(sessionId, nextPrompt, model);
+    if (nextPrompt.trim().startsWith("/")) {
+      await runCommand(sessionId, model, nextPrompt, repoPath);
+    } else {
+      await runAgent(sessionId, nextPrompt, model, repoPath);
+    }
     if (!serviceStatus.mongoAvailable) {
       return;
     }
@@ -356,14 +789,117 @@ export function App() {
     pushLog(`shell: ${JSON.stringify(result)}`);
   }
 
+  async function handleEditFile() {
+    if (!serviceStatus.serviceHealthy || !selectedSessionId || authPhase !== "ready" || !editPath.trim()) return;
+    const result = await editFile(selectedSessionId, editPath.trim(), editSearch, editReplace, false);
+    pushLog(`edit: ${result.output}`);
+    const refreshed = safeArray(await listMessages(selectedSessionId));
+    setMessages(refreshed);
+  }
+
+  async function handleApplyPatch() {
+    if (!serviceStatus.serviceHealthy || !selectedSessionId || authPhase !== "ready" || !patchText.trim()) return;
+    const result = await applyPatch(selectedSessionId, patchPath.trim() || undefined, patchText);
+    pushLog(`patch: ${result.output}`);
+    const refreshed = safeArray(await listMessages(selectedSessionId));
+    setMessages(refreshed);
+  }
+
   async function handlePickRepo() {
     const picked = await window.desktopApi?.pickDirectory?.();
-    if (picked) setRepoPath(picked);
+    if (picked) {
+      setRepoPath(picked);
+      try {
+        const commandData = safeArray(await listCommands(picked));
+        setCommands(commandData);
+      } catch (error) {
+        pushLog(`commands unavailable: ${(error as Error).message}`);
+      }
+    }
   }
 
   async function handleIndexRepo() {
     if (!repoPath || !serviceStatus.neo4jAvailable) return;
     await indexRepo(repoPath);
+  }
+
+  async function handleDiagnostics() {
+    if (!serviceStatus.serviceHealthy || authPhase !== "ready") return;
+    const target = diagnosticPath.trim() || repoPath;
+    if (!target) return;
+    try {
+      const items = safeArray(await getDiagnostics(target, repoPath));
+      setDiagnostics(items);
+      pushLog(`diagnostics loaded: ${items.length}`);
+    } catch (error) {
+      pushLog(`diagnostics unavailable: ${(error as Error).message}`);
+      setDiagnostics([]);
+    }
+  }
+
+  async function handleSymbols() {
+    if (!serviceStatus.serviceHealthy || authPhase !== "ready") return;
+    const target = symbolPath.trim() || diagnosticPath.trim() || repoPath;
+    if (!target) return;
+    try {
+      const items = safeArray(await getDocumentSymbols(target, repoPath));
+      setDocumentSymbols(items);
+      pushLog(`symbols loaded: ${items.length}`);
+    } catch (error) {
+      pushLog(`symbols unavailable: ${(error as Error).message}`);
+      setDocumentSymbols([]);
+    }
+  }
+
+  async function handleWorkspaceSymbols() {
+    if (!serviceStatus.serviceHealthy || authPhase !== "ready" || !repoPath) return;
+    try {
+      const items = safeArray(await getWorkspaceSymbols(repoPath, workspaceSymbolQuery.trim() || undefined));
+      setWorkspaceSymbols(items);
+      pushLog(`workspace symbols loaded: ${items.length}`);
+    } catch (error) {
+      pushLog(`workspace symbols unavailable: ${(error as Error).message}`);
+      setWorkspaceSymbols([]);
+    }
+  }
+
+  async function handleDefinitions() {
+    if (!serviceStatus.serviceHealthy || authPhase !== "ready") return;
+    const target = symbolPath.trim() || diagnosticPath.trim() || repoPath;
+    if (!target) return;
+    try {
+      const items = safeArray(await getDefinitions(target, Number(codeIntelLine) || 1, Number(codeIntelCharacter) || 1, repoPath));
+      setDefinitions(items);
+      pushLog(`definitions loaded: ${items.length}`);
+    } catch (error) {
+      pushLog(`definitions unavailable: ${(error as Error).message}`);
+      setDefinitions([]);
+    }
+  }
+
+  async function handleReferences() {
+    if (!serviceStatus.serviceHealthy || authPhase !== "ready") return;
+    const target = symbolPath.trim() || diagnosticPath.trim() || repoPath;
+    if (!target) return;
+    try {
+      const items = safeArray(await getReferences(target, Number(codeIntelLine) || 1, Number(codeIntelCharacter) || 1, repoPath));
+      setReferences(items);
+      pushLog(`references loaded: ${items.length}`);
+    } catch (error) {
+      pushLog(`references unavailable: ${(error as Error).message}`);
+      setReferences([]);
+    }
+  }
+
+  async function handleSubtask() {
+    if (!serviceStatus.serviceHealthy || !selectedSessionId || authPhase !== "ready" || !subtaskPrompt.trim()) return;
+    try {
+      const result = await runSubtask(selectedSessionId, model, subtaskPrompt, subtaskTitle, repoPath);
+      setSessions((current) => [result.session, ...safeArray(current).filter((item) => item.id !== result.session.id)]);
+      pushLog(`subtask created: ${result.session.title}`);
+    } catch (error) {
+      pushLog(`subtask failed: ${(error as Error).message}`);
+    }
   }
 
   async function handlePermission(decision: "allow_once" | "allow_session" | "deny") {
@@ -385,6 +921,8 @@ export function App() {
     bootPhase === "loading" ? "degraded" : serviceStatus.mode === "healthy" ? "healthy" : serviceStatus.mode;
   const browserAuthNeedsSetup = !window.desktopApi?.runtimeConfig && (authPhase === "missing" || authPhase === "invalid");
   const modelSelectDisabled = !serviceStatus.ollamaReachable || authPhase !== "ready";
+  const composerDisabled =
+    !serviceStatus.serviceHealthy || !serviceStatus.ollamaReachable || !serviceStatus.mongoAvailable || authPhase !== "ready";
 
   return (
     <div className="app-shell">
@@ -478,7 +1016,7 @@ export function App() {
               {safeMessages.map((message) => (
                 <div key={message.id} className={`message ${message.role}`}>
                   <div className="message-role">{message.role}</div>
-                  <pre>{extractText(message) || JSON.stringify(message.parts, null, 2)}</pre>
+                  {renderMessageParts(message)}
                 </div>
               ))}
             </div>
@@ -487,16 +1025,34 @@ export function App() {
                 value={prompt}
                 onChange={(event) => setPrompt(event.target.value)}
                 placeholder="Ask the assistant to inspect, edit, or explain your codebase..."
-                disabled={!serviceStatus.serviceHealthy || !serviceStatus.ollamaReachable || !serviceStatus.mongoAvailable || authPhase !== "ready"}
+                disabled={composerDisabled}
               />
+              {commandMatches.length > 0 && (
+                <div className="command-palette">
+                  {commandMatches.map((command: CommandDefinition) => (
+                    <button
+                      key={command.id}
+                      className="command-option"
+                      onClick={() => setPrompt(buildCommandPrompt(command))}
+                      disabled={composerDisabled}
+                    >
+                      <strong>/{command.id}</strong>
+                      <span>{command.description}</span>
+                      {command.usage && <code>{command.usage}</code>}
+                      {safeArray(command.arguments).length > 0 && (
+                        <small>
+                          {safeArray(command.arguments)
+                            .map((item) => `${item.required ? "*" : ""}${item.name}`)
+                            .join(" · ")}
+                        </small>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
               <button
                 onClick={handleSend}
-                disabled={
-                  !serviceStatus.serviceHealthy ||
-                  !serviceStatus.ollamaReachable ||
-                  !serviceStatus.mongoAvailable ||
-                  authPhase !== "ready"
-                }
+                disabled={composerDisabled}
               >
                 Send
               </button>
@@ -507,7 +1063,31 @@ export function App() {
             <div className="card">
               <h3>Repo</h3>
               <p>{repoPath || "No repo selected"}</p>
+              {repoPath && <p>Paste this path or use `/analyze`, `/ls`, `/read`, `/index`, or `/shell` for repo-aware actions.</p>}
+              {repoContext && (
+                <div className="repo-summary">
+                  <p>Indexed files: {repoContext.indexedFiles}</p>
+                  <p>Reference edges: {repoContext.referenceEdges}</p>
+                  <p>Touched files tracked: {repoContext.touchedFiles.length}</p>
+                  <p>Child sessions: {repoContext.childSessions.length}</p>
+                  <p>Lineage sessions: {repoContext.lineageSessions.length}</p>
+                  <p>Memory nodes: {repoContext.memories.length}</p>
+                </div>
+              )}
               {!serviceStatus.neo4jAvailable && <p>Graph indexing is unavailable until Neo4j comes back.</p>}
+            </div>
+            <div className="card">
+              <h3>Commands</h3>
+              <div className="command-list">
+                {safeCommands.slice(0, 10).map((command: CommandDefinition) => (
+                  <button key={command.id} className="command-list-item" onClick={() => setPrompt(buildCommandPrompt(command))}>
+                    <strong>/{command.id}</strong>
+                    <span>{command.description}</span>
+                    {command.usage && <code>{command.usage}</code>}
+                  </button>
+                ))}
+                {safeCommands.length === 0 && <p>No commands loaded.</p>}
+              </div>
             </div>
             <div className="card">
               <h3>Shell Tool</h3>
@@ -515,6 +1095,168 @@ export function App() {
               <button onClick={handleShell} disabled={!selectedSessionId || !serviceStatus.serviceHealthy || authPhase !== "ready"}>
                 Run shell command
               </button>
+            </div>
+            <div className="card">
+              <h3>File Edit</h3>
+              <input value={editPath} onChange={(event) => setEditPath(event.target.value)} placeholder="File path" />
+              <textarea value={editSearch} onChange={(event) => setEditSearch(event.target.value)} placeholder="Search text" />
+              <textarea value={editReplace} onChange={(event) => setEditReplace(event.target.value)} placeholder="Replace text" />
+              <button onClick={handleEditFile} disabled={!selectedSessionId || !serviceStatus.serviceHealthy || authPhase !== "ready"}>
+                Apply edit
+              </button>
+            </div>
+            <div className="card">
+              <h3>Apply Patch</h3>
+              <input
+                value={patchPath}
+                onChange={(event) => setPatchPath(event.target.value)}
+                placeholder="Optional file path (blank when patch includes file markers)"
+              />
+              <textarea
+                value={patchText}
+                onChange={(event) => setPatchText(event.target.value)}
+                placeholder={"*** FILE: src/example.ts\n<<<<<<< SEARCH\nold text\n=======\nnew text\n>>>>>>> REPLACE"}
+              />
+              <button onClick={handleApplyPatch} disabled={!selectedSessionId || !serviceStatus.serviceHealthy || authPhase !== "ready"}>
+                Apply patch
+              </button>
+            </div>
+            <div className="card">
+              <h3>Diagnostics</h3>
+              <input
+                value={diagnosticPath}
+                onChange={(event) => setDiagnosticPath(event.target.value)}
+                placeholder={repoPath ? "Leave blank to use selected repo/file path" : "Enter file path"}
+              />
+              <button onClick={handleDiagnostics} disabled={!serviceStatus.serviceHealthy || authPhase !== "ready"}>
+                Run diagnostics
+              </button>
+              <div className="mini-list">
+                {safeDiagnostics.length === 0 && <p>No diagnostics loaded.</p>}
+                {safeDiagnostics.slice(0, 10).map((item, index) => (
+                  <pre key={`${item.path}-${item.line}-${index}`}>{`${item.severity.toUpperCase()} ${item.path}:${item.line}:${item.character} ${item.message}`}</pre>
+                ))}
+              </div>
+            </div>
+            <div className="card">
+              <h3>LSP Code Intel</h3>
+              <input
+                value={symbolPath}
+                onChange={(event) => setSymbolPath(event.target.value)}
+                placeholder={repoPath ? "Leave blank to use repo/file path" : "Enter file path"}
+              />
+              <div className="inline-fields">
+                <input value={codeIntelLine} onChange={(event) => setCodeIntelLine(event.target.value)} placeholder="Line" />
+                <input value={codeIntelCharacter} onChange={(event) => setCodeIntelCharacter(event.target.value)} placeholder="Character" />
+              </div>
+              <div className="inline-actions">
+                <button onClick={handleSymbols} disabled={!serviceStatus.serviceHealthy || authPhase !== "ready"}>
+                  Symbols
+                </button>
+                <button onClick={handleWorkspaceSymbols} disabled={!serviceStatus.serviceHealthy || authPhase !== "ready" || !repoPath}>
+                  Workspace
+                </button>
+                <button onClick={handleDefinitions} disabled={!serviceStatus.serviceHealthy || authPhase !== "ready"}>
+                  Definition
+                </button>
+                <button onClick={handleReferences} disabled={!serviceStatus.serviceHealthy || authPhase !== "ready"}>
+                  References
+                </button>
+              </div>
+              <input
+                value={workspaceSymbolQuery}
+                onChange={(event) => setWorkspaceSymbolQuery(event.target.value)}
+                placeholder="Workspace symbol query"
+              />
+              <div className="mini-list">
+                {safeDocumentSymbols.slice(0, 8).map((item, index) => (
+                  <pre key={`${item.path}-${item.name}-${index}`}>{`${item.kind} ${item.name}\n${item.path}:${item.line}:${item.character}`}</pre>
+                ))}
+                {safeWorkspaceSymbols.slice(0, 10).map((item, index) => (
+                  <pre key={`${item.path}-${item.name}-${index}`}>{`WS ${item.kind} ${item.name}\n${item.path}:${item.line}:${item.character}`}</pre>
+                ))}
+                {safeDefinitions.slice(0, 5).map((item, index) => (
+                  <pre key={`${item.path}-${item.line}-${index}`}>{`DEF ${item.path}:${item.line}:${item.character}\n${item.preview ?? ""}`}</pre>
+                ))}
+                {safeReferences.slice(0, 5).map((item, index) => (
+                  <pre key={`${item.path}-${item.line}-${index}`}>{`REF ${item.path}:${item.line}:${item.character}\n${item.preview ?? ""}`}</pre>
+                ))}
+                {safeDocumentSymbols.length === 0 && safeWorkspaceSymbols.length === 0 && safeDefinitions.length === 0 && safeReferences.length === 0 && <p>No code-intel results loaded.</p>}
+              </div>
+            </div>
+            <div className="card">
+              <h3>MCP Tools</h3>
+              <div className="mini-list">
+                {safeMCPServerStatuses.slice(0, 8).map((item, index) => (
+                  <pre key={`${item.server}-${index}`}>{`${item.server} [${item.transport}] reachable=${item.reachable} tools=${item.toolCount}${item.error ? `\n${item.error}` : ""}`}</pre>
+                ))}
+                {safeMCPTools.length === 0 && <p>No MCP tools discovered.</p>}
+                {safeMCPTools.slice(0, 12).map((item, index) => (
+                  <pre key={`${item.server}-${item.name}-${index}`}>{`${item.server}/${item.name}${item.transport ? ` [${item.transport}]` : ""}\n${item.description ?? ""}`}</pre>
+                ))}
+              </div>
+            </div>
+            <div className="card">
+              <h3>Tool Activity</h3>
+              <div className="mini-list">
+                {safeToolActivities.length === 0 && <p>No recent tool activity.</p>}
+                {safeToolActivities.map((item) => renderToolActivity(item))}
+              </div>
+            </div>
+            <div className="card">
+              <h3>Runtime</h3>
+              <div className="mini-list">
+                {safeRuntimeEvents.length === 0 && <p>No runtime state yet.</p>}
+                {safeRuntimeEvents.map((entry, index) => (
+                  <pre key={`${entry}-${index}`}>{entry}</pre>
+                ))}
+              </div>
+            </div>
+            <div className="card">
+              <h3>Subtask</h3>
+              <input value={subtaskTitle} onChange={(event) => setSubtaskTitle(event.target.value)} placeholder="Subtask title" />
+              <textarea value={subtaskPrompt} onChange={(event) => setSubtaskPrompt(event.target.value)} placeholder="Focused subtask prompt" />
+              <button onClick={handleSubtask} disabled={!selectedSessionId || !serviceStatus.serviceHealthy || authPhase !== "ready"}>
+                Run subtask
+              </button>
+            </div>
+            {repoContext && (
+              <div className="card">
+                <h3>Repo Graph</h3>
+                <div className="mini-list">
+                  <pre>{`Repo: ${repoContext.repoPath}\nIndexed: ${repoContext.indexedFiles}\nReferences: ${repoContext.referenceEdges}`}</pre>
+                  {repoContext.touchedFiles.slice(0, 8).map((item, index) => (
+                    <pre key={`${item}-${index}`}>{item}</pre>
+                  ))}
+                  {repoContext.childSessions.slice(0, 6).map((item, index) => (
+                    <pre key={`${item}-${index}`}>{`child session: ${item}`}</pre>
+                  ))}
+                  {repoContext.lineageSessions.slice(0, 6).map((item, index) => (
+                    <pre key={`${item}-${index}`}>{`lineage session: ${item}`}</pre>
+                  ))}
+                  {repoContext.memories.slice(0, 6).map((item) => (
+                    <pre key={item.id}>{`${item.kind}: ${item.label}`}</pre>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className="card">
+              <h3>Retrieval Preview</h3>
+              <div className="mini-list">
+                {!retrievalPreview && <p>Type a repo-aware prompt to preview ranked context.</p>}
+                {safeRetrievalFileMatches.slice(0, 8).map((item, index) => (
+                  <pre key={`${item.path}-${index}`}>{`FILE ${item.score} ${item.path}\n${safeArray(item.reasons).join(" · ")}`}</pre>
+                ))}
+                {safeRetrievalSymbolMatches.slice(0, 6).map((item, index) => (
+                  <pre key={`${item.filePath}-${item.name}-${index}`}>{`SYMBOL ${item.score ?? 0} ${item.name} (${item.kind})\n${item.filePath}:${item.line}\n${safeArray(item.reasons).join(" · ")}`}</pre>
+                ))}
+                {safeRetrievalMemoryMatches.slice(0, 5).map((item) => (
+                  <pre key={item.id}>{`MEMORY ${item.score} ${item.kind}: ${item.label}\n${safeArray(item.reasons).join(" · ")}`}</pre>
+                ))}
+                {safeRetrievalSnippets.slice(0, 3).map((item, index) => (
+                  <pre key={`snippet-${index}`}>{item}</pre>
+                ))}
+              </div>
             </div>
             <div className="card logs-card">
               <h3>Logs</h3>
@@ -532,8 +1274,22 @@ export function App() {
         <div className="modal-backdrop">
           <div className="modal">
             <h3>Permission required</h3>
+            <p className="permission-meta">
+              <strong>{pendingPermission.toolName}</strong> · {pendingPermission.action}
+            </p>
             <p>{pendingPermission.description}</p>
-            <pre>{pendingPermission.params}</pre>
+            {permissionPaths.length > 0 && (
+              <div className="permission-paths">
+                <strong>Affected paths</strong>
+                <ul>
+                  {permissionPaths.map((item, index) => (
+                    <li key={`${item}-${index}`}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {pendingPermission.preview && <pre className="permission-preview">{pendingPermission.preview}</pre>}
+            {pendingPermission.params && <pre>{pendingPermission.params}</pre>}
             <div className="modal-actions">
               <button onClick={() => handlePermission("allow_once")}>Allow once</button>
               <button onClick={() => handlePermission("allow_session")}>Allow session</button>
@@ -545,4 +1301,3 @@ export function App() {
     </div>
   );
 }
-
