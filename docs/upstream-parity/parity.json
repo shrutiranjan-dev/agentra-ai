@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-06-04T09:25:35.352Z",
+  "generatedAt": "2026-06-04T18:17:13.638Z",
   "baselines": [
     {
       "id": "opencode-archive",
@@ -8,9 +8,8 @@
       "localPath": "upstream/opencode-archive",
       "ref": "archived-local-snapshot",
       "notes": "Historical OpenCode baseline retained for provenance.",
-      "commit": "73ee493265acf15fcd8caab2bc8cd3bd375b63cb",
+      "commit": "",
       "topLevel": [
-        ".git",
         ".github",
         ".gitignore",
         ".goreleaser.yml",
@@ -35,11 +34,10 @@
       "localPath": "upstream/crush-live",
       "ref": "main",
       "notes": "Current live successor baseline for upstream parity decisions.",
-      "commit": "b688d52687100096e2c35a6c91fd1d8be75a42d7",
+      "commit": "",
       "topLevel": [
         ".agents",
         ".envrc",
-        ".git",
         ".gitattributes",
         ".github",
         ".gitignore",
@@ -66,7 +64,7 @@
   ],
   "currentProject": {
     "name": "my-allrounder-agent",
-    "commit": "35e0fe78f20c837fb2393908ecae0da706890df2",
+    "commit": "e55e1c308c4e93e387917e67fc87b55412fd5aec",
     "topLevel": [
       ".env.example",
       ".git",
@@ -78,6 +76,7 @@
       "desktop",
       "desktop.log",
       "docker-compose.yml",
+      "docs",
       "go.work",
       "go.work.sum",
       "mongo-data",
@@ -111,9 +110,13 @@
       "analyze",
       "diagnostics",
       "symbols",
+      "workspace-symbols",
+      "workspace-definitions",
+      "workspace-references",
       "definition",
       "references",
       "mcp",
+      "mcp-status",
       "compact",
       "task"
     ],
@@ -131,6 +134,10 @@
       "lsp_symbols",
       "lsp_definition",
       "lsp_references",
+      "lsp_workspace_symbols",
+      "lsp_workspace_definitions",
+      "lsp_workspace_references",
+      "mcp_servers",
       "run_subtask"
     ],
     "facts": {
@@ -184,7 +191,7 @@
       "capability": "Commands and Command Discovery",
       "status": "partial",
       "sourceOfTruth": "archive",
-      "current": "19 built-in commands plus project/user command loading",
+      "current": "23 built-in commands plus project/user command loading",
       "archive": "Custom commands with named arguments",
       "crush": "Terminal command workflows and extensible interaction model",
       "notes": "Current custom commands are simpler than upstream named-argument behavior."
@@ -193,7 +200,7 @@
       "capability": "Tool Loop and Approvals",
       "status": "partial",
       "sourceOfTruth": "both",
-      "current": "14 tool schemas with approval broker and patch/edit flow",
+      "current": "18 tool schemas with approval broker and patch/edit flow",
       "archive": "Tool execution with approvals and file-change tracking",
       "crush": "Tool-driven coding flow with richer terminal integration",
       "notes": "Core loop exists, but deeper parity around orchestration and tool semantics is still pending."

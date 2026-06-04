@@ -124,6 +124,7 @@ type ContinuationState struct {
 	SummaryParentMessageID string    `json:"summaryParentMessageId,omitempty"`
 	SummaryFromMessageID   string    `json:"summaryFromMessageId,omitempty"`
 	SummaryToMessageID     string    `json:"summaryToMessageId,omitempty"`
+	SummaryDepth           int       `json:"summaryDepth,omitempty"`
 	CompactedMessages      int       `json:"compactedMessages"`
 	RecentMessages         int       `json:"recentMessages"`
 	CreatedAt              time.Time `json:"createdAt"`
@@ -135,6 +136,7 @@ type SubtaskLink struct {
 	ChildSessionID  string `json:"childSessionId"`
 	Title           string `json:"title"`
 	Prompt          string `json:"prompt,omitempty"`
+	Summary         string `json:"summary,omitempty"`
 	Status          string `json:"status"`
 }
 

@@ -31,6 +31,8 @@ func (a *App) ListCommands(_ context.Context, repoPath string) ([]domain.Command
 		{ID: "diagnostics", Title: "Diagnostics", Description: "Run LSP diagnostics for a file", Kind: "builtin", Usage: "/diagnostics <path>", Arguments: []domain.CommandArgumentDefinition{{Name: "path", Description: "File path for diagnostics", Required: true}}},
 		{ID: "symbols", Title: "Document Symbols", Description: "List LSP document symbols for a file", Kind: "builtin", Usage: "/symbols <path>", Arguments: []domain.CommandArgumentDefinition{{Name: "path", Description: "File path for symbol lookup", Required: true}}},
 		{ID: "workspace-symbols", Title: "Workspace Symbols", Description: "Search symbols across the active repository", Kind: "builtin", Usage: "/workspace-symbols [query]", Arguments: []domain.CommandArgumentDefinition{{Name: "query", Description: "Optional symbol query", Required: false}}},
+		{ID: "workspace-definitions", Title: "Workspace Definitions", Description: "Find definitions across the active repository for matching symbols", Kind: "builtin", Usage: "/workspace-definitions [query]", Arguments: []domain.CommandArgumentDefinition{{Name: "query", Description: "Optional symbol query", Required: false}}},
+		{ID: "workspace-references", Title: "Workspace References", Description: "Find references across the active repository for matching symbols", Kind: "builtin", Usage: "/workspace-references [query]", Arguments: []domain.CommandArgumentDefinition{{Name: "query", Description: "Optional symbol query", Required: false}}},
 		{ID: "definition", Title: "Definition", Description: "Find LSP definition at a file position", Kind: "builtin", Usage: "/definition <path> <line> <character>", Arguments: []domain.CommandArgumentDefinition{{Name: "path", Description: "File path", Required: true}, {Name: "line", Description: "1-based line", Required: true}, {Name: "character", Description: "1-based character", Required: true}}},
 		{ID: "references", Title: "References", Description: "Find LSP references at a file position", Kind: "builtin", Usage: "/references <path> <line> <character>", Arguments: []domain.CommandArgumentDefinition{{Name: "path", Description: "File path", Required: true}, {Name: "line", Description: "1-based line", Required: true}, {Name: "character", Description: "1-based character", Required: true}}},
 		{ID: "mcp", Title: "MCP Tools", Description: "List configured MCP tools", Kind: "builtin", Usage: "/mcp"},
@@ -285,6 +287,26 @@ func (a *App) executeCommand(ctx context.Context, sessionID, model, repoPath, in
 			lines = append(lines, fmt.Sprintf("- %s (%s) at %s:%d:%d", item.Name, item.Kind, item.Path, item.Line, item.Character))
 		}
 		return a.saveAssistantTextMessage(ctx, sessionID, model, strings.Join(lines, "\n"), "stop")
+	case "workspace-definitions":
+		if strings.TrimSpace(repoPath) == "" {
+			return a.saveAssistantTextMessage(ctx, sessionID, model, "Usage: /workspace-definitions [query] with an active repository selected.", "stop")
+		}
+		query := strings.TrimSpace(firstNonEmpty(parsedArgs.Named["query"], strings.Join(parsedArgs.Positional, " ")))
+		items, err := a.WorkspaceDefinitions(ctx, repoPath, query)
+		if err != nil {
+			return a.saveAssistantTextMessage(ctx, sessionID, model, "Workspace definitions failed: "+err.Error(), "stop")
+		}
+		return a.saveAssistantTextMessage(ctx, sessionID, model, locationsText("Workspace definitions", items), "stop")
+	case "workspace-references":
+		if strings.TrimSpace(repoPath) == "" {
+			return a.saveAssistantTextMessage(ctx, sessionID, model, "Usage: /workspace-references [query] with an active repository selected.", "stop")
+		}
+		query := strings.TrimSpace(firstNonEmpty(parsedArgs.Named["query"], strings.Join(parsedArgs.Positional, " ")))
+		items, err := a.WorkspaceReferences(ctx, repoPath, query)
+		if err != nil {
+			return a.saveAssistantTextMessage(ctx, sessionID, model, "Workspace references failed: "+err.Error(), "stop")
+		}
+		return a.saveAssistantTextMessage(ctx, sessionID, model, locationsText("Workspace references", items), "stop")
 	case "definition":
 		target := strings.TrimSpace(firstNonEmpty(parsedArgs.Named["path"], firstPositional(parsedArgs, 0)))
 		lineArg := strings.TrimSpace(firstNonEmpty(parsedArgs.Named["line"], firstPositional(parsedArgs, 1)))
@@ -321,7 +343,11 @@ func (a *App) executeCommand(ctx context.Context, sessionID, model, repoPath, in
 		}
 		lines := []string{"Configured MCP tools:"}
 		for _, item := range items {
-			lines = append(lines, fmt.Sprintf("- %s/%s — %s", item.Server, item.Name, item.Description))
+			transport := ""
+			if strings.TrimSpace(item.Transport) != "" {
+				transport = fmt.Sprintf(" [%s]", strings.ToUpper(item.Transport))
+			}
+			lines = append(lines, fmt.Sprintf("- %s/%s%s — %s", item.Server, item.Name, transport, item.Description))
 		}
 		return a.saveAssistantTextMessage(ctx, sessionID, model, strings.Join(lines, "\n"), "stop")
 	case "mcp-status":
@@ -335,8 +361,17 @@ func (a *App) executeCommand(ctx context.Context, sessionID, model, repoPath, in
 		lines := []string{"MCP servers:"}
 		for _, item := range items {
 			line := fmt.Sprintf("- %s [%s] reachable=%t tools=%d", item.Server, item.Transport, item.Reachable, item.ToolCount)
+			if item.LatencyMs > 0 {
+				line += fmt.Sprintf(" latency=%dms", item.LatencyMs)
+			}
+			if strings.TrimSpace(item.Endpoint) != "" {
+				line += " endpoint=" + item.Endpoint
+			}
 			if strings.TrimSpace(item.Error) != "" {
 				line += " error=" + item.Error
+			}
+			if len(item.ToolNames) > 0 {
+				line += " tools=[" + strings.Join(item.ToolNames, ", ") + "]"
 			}
 			lines = append(lines, line)
 		}

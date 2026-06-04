@@ -214,6 +214,11 @@ select {
   background: #111827;
 }
 
+.command-option.active {
+  border-color: #60a5fa;
+  background: #172554;
+}
+
 .command-option span,
 .command-list-item span {
   opacity: 0.8;
@@ -227,6 +232,33 @@ select {
   font-size: 12px;
 }
 
+.command-detail {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid #334155;
+  background: #111827;
+}
+
+.command-arguments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.command-arguments span {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #020617;
+  border: 1px solid #334155;
+  font-size: 12px;
+}
+
+.command-arguments .required {
+  border-color: #60a5fa;
+}
+
 .inline-fields,
 .inline-actions {
   display: grid;
@@ -235,7 +267,7 @@ select {
 }
 
 .inline-actions {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .repo-summary,
@@ -247,6 +279,39 @@ select {
 .mini-list {
   max-height: 220px;
   overflow: auto;
+}
+
+.status-row {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid #334155;
+  background: #020617;
+}
+
+.status-row.success,
+.status-row.healthy {
+  border-color: rgba(16, 185, 129, 0.5);
+}
+
+.status-row.error,
+.status-row.offline {
+  border-color: rgba(239, 68, 68, 0.5);
+}
+
+.status-row.pending,
+.status-row.degraded {
+  border-color: rgba(245, 158, 11, 0.5);
+}
+
+.status-row.neutral {
+  border-color: rgba(96, 165, 250, 0.35);
+}
+
+.status-row code,
+.status-row small {
+  opacity: 0.8;
 }
 
 .composer textarea {

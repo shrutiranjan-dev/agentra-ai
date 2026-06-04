@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,12 +16,14 @@ import (
 )
 
 type ServerConfig struct {
-	Transport string            `json:"transport"`
-	Command   string            `json:"command"`
-	Args      []string          `json:"args"`
-	Env       map[string]string `json:"env"`
-	URL       string            `json:"url"`
-	Headers   map[string]string `json:"headers"`
+	Transport  string            `json:"transport"`
+	Command    string            `json:"command"`
+	Args       []string          `json:"args"`
+	Env        map[string]string `json:"env"`
+	URL        string            `json:"url"`
+	MessageURL string            `json:"messageUrl"`
+	TimeoutMs  int               `json:"timeoutMs"`
+	Headers    map[string]string `json:"headers"`
 }
 
 type ToolInfo struct {
@@ -33,11 +36,15 @@ type ToolInfo struct {
 }
 
 type ServerStatus struct {
-	Server    string `json:"server"`
-	Transport string `json:"transport"`
-	Reachable bool   `json:"reachable"`
-	ToolCount int    `json:"toolCount"`
-	Error     string `json:"error,omitempty"`
+	Server    string   `json:"server"`
+	Transport string   `json:"transport"`
+	Reachable bool     `json:"reachable"`
+	ToolCount int      `json:"toolCount"`
+	ToolNames []string `json:"toolNames,omitempty"`
+	LatencyMs int64    `json:"latencyMs,omitempty"`
+	Endpoint  string   `json:"endpoint,omitempty"`
+	Detail    string   `json:"detail,omitempty"`
+	Error     string   `json:"error,omitempty"`
 }
 
 type rpcEnvelope struct {
@@ -159,13 +166,26 @@ func (c *Client) CallTool(ctx context.Context, cfg ServerConfig, toolName string
 }
 
 func (c *Client) Probe(ctx context.Context, serverName string, cfg ServerConfig) ServerStatus {
+	started := time.Now()
 	items, err := c.ListTools(ctx, serverName, cfg)
 	if err != nil {
 		return ServerStatus{
 			Server:    serverName,
 			Transport: transportName(cfg),
 			Reachable: false,
+			LatencyMs: time.Since(started).Milliseconds(),
+			Endpoint:  statusEndpoint(cfg),
 			Error:     err.Error(),
+		}
+	}
+	toolNames := make([]string, 0, len(items))
+	for _, item := range items {
+		if strings.TrimSpace(item.Name) == "" {
+			continue
+		}
+		toolNames = append(toolNames, item.Name)
+		if len(toolNames) >= 8 {
+			break
 		}
 	}
 	return ServerStatus{
@@ -173,6 +193,10 @@ func (c *Client) Probe(ctx context.Context, serverName string, cfg ServerConfig)
 		Transport: transportName(cfg),
 		Reachable: true,
 		ToolCount: len(items),
+		ToolNames: toolNames,
+		LatencyMs: time.Since(started).Milliseconds(),
+		Endpoint:  statusEndpoint(cfg),
+		Detail:    statusDetail(cfg),
 	}
 }
 
@@ -181,7 +205,7 @@ func (c *Client) call(ctx context.Context, cfg ServerConfig, method string, para
 	case "http":
 		return c.callHTTP(ctx, cfg, method, params)
 	case "sse":
-		return nil, fmt.Errorf("mcp sse transport is not yet supported by this desktop runtime")
+		return c.callSSE(ctx, cfg, method, params)
 	default:
 		return c.callStdio(ctx, cfg, method, params)
 	}
@@ -263,7 +287,7 @@ func (c *Client) callHTTP(ctx context.Context, cfg ServerConfig, method string, 
 	for key, value := range cfg.Headers {
 		request.Header.Set(key, value)
 	}
-	response, err := http.DefaultClient.Do(request)
+	response, err := httpClient(cfg).Do(request)
 	if err != nil {
 		return nil, err
 	}
@@ -286,12 +310,111 @@ func (c *Client) callHTTP(ctx context.Context, cfg ServerConfig, method string, 
 	return envelope.Result, nil
 }
 
+func (c *Client) callSSE(ctx context.Context, cfg ServerConfig, method string, params map[string]any) (json.RawMessage, error) {
+	if strings.TrimSpace(cfg.URL) == "" {
+		return nil, fmt.Errorf("mcp sse url is empty")
+	}
+	streamCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+
+	request, err := http.NewRequestWithContext(streamCtx, http.MethodGet, cfg.URL, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Accept", "text/event-stream")
+	for key, value := range cfg.Headers {
+		request.Header.Set(key, value)
+	}
+	response, err := httpClient(cfg).Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= 400 {
+		body, _ := io.ReadAll(response.Body)
+		return nil, fmt.Errorf("mcp sse %s: %s", response.Status, strings.TrimSpace(string(body)))
+	}
+
+	reader := bufio.NewReader(response.Body)
+	messageURL, err := discoverSSEMessageURL(streamCtx, cfg, reader)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.postSSERequest(streamCtx, cfg, messageURL, 1, "initialize", map[string]any{
+		"protocolVersion": "2025-06-18",
+		"capabilities":    map[string]any{},
+		"clientInfo": map[string]any{
+			"name":    "personal-assistant",
+			"version": "0.1.0",
+		},
+	}); err != nil {
+		return nil, err
+	}
+	if _, err := readSSEEnvelope(streamCtx, reader, 1); err != nil {
+		return nil, err
+	}
+	if err := c.postSSENotification(streamCtx, cfg, messageURL, "notifications/initialized", map[string]any{}); err != nil {
+		return nil, err
+	}
+	if err := c.postSSERequest(streamCtx, cfg, messageURL, 2, method, params); err != nil {
+		return nil, err
+	}
+	envelope, err := readSSEEnvelope(streamCtx, reader, 2)
+	if err != nil {
+		return nil, err
+	}
+	return envelope.Result, nil
+}
+
 func transportName(cfg ServerConfig) string {
 	value := strings.ToLower(strings.TrimSpace(cfg.Transport))
 	if value == "" {
 		return "stdio"
 	}
 	return value
+}
+
+func statusEndpoint(cfg ServerConfig) string {
+	switch transportName(cfg) {
+	case "http", "sse":
+		return strings.TrimSpace(cfg.URL)
+	default:
+		if strings.TrimSpace(cfg.Command) == "" {
+			return ""
+		}
+		return strings.TrimSpace(cfg.Command)
+	}
+}
+
+func statusDetail(cfg ServerConfig) string {
+	switch transportName(cfg) {
+	case "http", "sse":
+		extras := make([]string, 0, 3)
+		if len(cfg.Headers) > 0 {
+			extras = append(extras, fmt.Sprintf("%d header(s)", len(cfg.Headers)))
+		}
+		if cfg.TimeoutMs > 0 {
+			extras = append(extras, fmt.Sprintf("timeout %dms", cfg.TimeoutMs))
+		}
+		if transportName(cfg) == "sse" && strings.TrimSpace(cfg.MessageURL) != "" {
+			extras = append(extras, "explicit messageUrl")
+		}
+		if transportName(cfg) == "sse" {
+			if len(extras) > 0 {
+				return "remote SSE stream · " + strings.Join(extras, " · ")
+			}
+			return "remote SSE stream"
+		}
+		if len(extras) > 0 {
+			return "remote transport · " + strings.Join(extras, " · ")
+		}
+		return "remote transport"
+	default:
+		if len(cfg.Args) > 0 {
+			return strings.Join(cfg.Args, " ")
+		}
+		return "local stdio process"
+	}
 }
 
 func readEnvelope(reader *bufio.Reader) (rpcEnvelope, error) {
@@ -307,6 +430,162 @@ func readEnvelope(reader *bufio.Reader) (rpcEnvelope, error) {
 		return rpcEnvelope{}, fmt.Errorf("mcp error %d: %s", envelope.Error.Code, envelope.Error.Message)
 	}
 	return envelope, nil
+}
+
+type sseEvent struct {
+	Name string
+	Data string
+}
+
+func discoverSSEMessageURL(ctx context.Context, cfg ServerConfig, reader *bufio.Reader) (string, error) {
+	if strings.TrimSpace(cfg.MessageURL) != "" {
+		return resolveSSEURL(cfg.URL, cfg.MessageURL), nil
+	}
+	fallback := strings.TrimSpace(cfg.URL)
+	for {
+		event, err := readSSEEvent(ctx, reader)
+		if err != nil {
+			if fallback != "" {
+				return fallback, nil
+			}
+			return "", err
+		}
+		if strings.EqualFold(strings.TrimSpace(event.Name), "endpoint") {
+			if resolved := resolveSSEURL(cfg.URL, event.Data); resolved != "" {
+				return resolved, nil
+			}
+		}
+		if strings.Contains(event.Data, `"jsonrpc"`) && fallback != "" {
+			return fallback, nil
+		}
+	}
+}
+
+func readSSEEnvelope(ctx context.Context, reader *bufio.Reader, expectedID int64) (rpcEnvelope, error) {
+	for {
+		event, err := readSSEEvent(ctx, reader)
+		if err != nil {
+			return rpcEnvelope{}, err
+		}
+		if strings.TrimSpace(event.Data) == "" {
+			continue
+		}
+		var envelope rpcEnvelope
+		if err := json.Unmarshal([]byte(event.Data), &envelope); err != nil {
+			continue
+		}
+		if envelope.Error != nil {
+			return rpcEnvelope{}, fmt.Errorf("mcp error %d: %s", envelope.Error.Code, envelope.Error.Message)
+		}
+		if expectedID == 0 || envelope.ID == expectedID {
+			return envelope, nil
+		}
+	}
+}
+
+func readSSEEvent(ctx context.Context, reader *bufio.Reader) (sseEvent, error) {
+	event := sseEvent{Name: "message"}
+	dataLines := make([]string, 0, 2)
+	for {
+		select {
+		case <-ctx.Done():
+			return sseEvent{}, ctx.Err()
+		default:
+		}
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return sseEvent{}, err
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			if len(dataLines) == 0 && event.Name == "message" {
+				continue
+			}
+			event.Data = strings.Join(dataLines, "\n")
+			return event, nil
+		}
+		if strings.HasPrefix(line, ":") {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, "event:"):
+			event.Name = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case strings.HasPrefix(line, "data:"):
+			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+	}
+}
+
+func resolveSSEURL(baseURL string, endpoint string) string {
+	trimmed := strings.TrimSpace(endpoint)
+	if trimmed == "" {
+		return strings.TrimSpace(baseURL)
+	}
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return trimmed
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return trimmed
+	}
+	return base.ResolveReference(parsed).String()
+}
+
+func (c *Client) postSSERequest(ctx context.Context, cfg ServerConfig, messageURL string, id int64, method string, params map[string]any) error {
+	payload, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"method":  method,
+		"params":  params,
+	})
+	if err != nil {
+		return err
+	}
+	return c.postSSEPayload(ctx, cfg, messageURL, payload)
+}
+
+func (c *Client) postSSENotification(ctx context.Context, cfg ServerConfig, messageURL string, method string, params map[string]any) error {
+	payload, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  method,
+		"params":  params,
+	})
+	if err != nil {
+		return err
+	}
+	return c.postSSEPayload(ctx, cfg, messageURL, payload)
+}
+
+func (c *Client) postSSEPayload(ctx context.Context, cfg ServerConfig, messageURL string, payload []byte) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, messageURL, strings.NewReader(string(payload)))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json, text/event-stream")
+	for key, value := range cfg.Headers {
+		request.Header.Set(key, value)
+	}
+	response, err := httpClient(cfg).Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= 400 {
+		body, _ := io.ReadAll(response.Body)
+		return fmt.Errorf("mcp sse %s: %s", response.Status, strings.TrimSpace(string(body)))
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	return nil
+}
+
+func httpClient(cfg ServerConfig) *http.Client {
+	timeout := 10 * time.Second
+	if cfg.TimeoutMs > 0 {
+		timeout = time.Duration(cfg.TimeoutMs) * time.Millisecond
+	}
+	return &http.Client{Timeout: timeout}
 }
 
 func readMessage(reader *bufio.Reader) ([]byte, error) {

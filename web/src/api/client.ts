@@ -258,6 +258,28 @@ export async function getWorkspaceSymbols(repoPath: string, query?: string): Pro
   return parseJSONOrThrow<WorkspaceSymbolResult[]>(response);
 }
 
+export async function getWorkspaceDefinitions(repoPath: string, query?: string): Promise<CodeIntelLocation[]> {
+  const params = new URLSearchParams({ repoPath });
+  if (query) {
+    params.set("query", query);
+  }
+  const response = await fetch(`${resolvedBaseUrl}/api/lsp/workspace-definitions?${params.toString()}`, {
+    headers: headers()
+  });
+  return parseJSONOrThrow<CodeIntelLocation[]>(response);
+}
+
+export async function getWorkspaceReferences(repoPath: string, query?: string): Promise<CodeIntelLocation[]> {
+  const params = new URLSearchParams({ repoPath });
+  if (query) {
+    params.set("query", query);
+  }
+  const response = await fetch(`${resolvedBaseUrl}/api/lsp/workspace-references?${params.toString()}`, {
+    headers: headers()
+  });
+  return parseJSONOrThrow<CodeIntelLocation[]>(response);
+}
+
 export async function listMCPTools(repoPath?: string): Promise<MCPToolInfo[]> {
   const suffix = repoPath ? `?repoPath=${encodeURIComponent(repoPath)}` : "";
   const response = await fetch(`${resolvedBaseUrl}/api/mcp/tools${suffix}`, {

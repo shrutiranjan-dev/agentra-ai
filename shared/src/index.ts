@@ -213,6 +213,10 @@ export interface MCPServerStatus {
   transport: "stdio" | "http" | "sse";
   reachable: boolean;
   toolCount: number;
+  toolNames?: string[];
+  latencyMs?: number;
+  endpoint?: string;
+  detail?: string;
   error?: string;
 }
 
@@ -237,6 +241,7 @@ export interface ContinuationState {
   summaryParentMessageId?: string;
   summaryFromMessageId?: string;
   summaryToMessageId?: string;
+  summaryDepth?: number;
   compactedMessages: number;
   recentMessages: number;
   createdAt: string;
@@ -248,7 +253,14 @@ export interface SubtaskLink {
   childSessionId: string;
   title: string;
   prompt?: string;
+  summary?: string;
   status: string;
+}
+
+export interface RepoSubtaskSummary {
+  sessionId: string;
+  title: string;
+  summary: string;
 }
 
 export interface RepoGraphSummary {
@@ -257,6 +269,7 @@ export interface RepoGraphSummary {
   indexedDirectories: number;
   importEdges: number;
   referenceEdges: number;
+  symbolReferenceEdges: number;
   symbolCount: number;
   touchedFiles: string[];
   relatedFiles: string[];
@@ -265,6 +278,7 @@ export interface RepoGraphSummary {
   relatedSymbols?: RepoSymbolMatch[];
   childSessions: string[];
   lineageSessions: string[];
+  recentSubtasks?: RepoSubtaskSummary[];
   memories: Array<{
     id: string;
     kind: string;

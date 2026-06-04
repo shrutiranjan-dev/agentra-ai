@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   CodeIntelLocation,
   CommandDefinition,
@@ -29,6 +29,8 @@ import {
   getRepoRetrievalPreview,
   getReferences,
   getServiceStatus,
+  getWorkspaceDefinitions,
+  getWorkspaceReferences,
   getWorkspaceSymbols,
   indexRepo,
   listMCPTools,
@@ -122,25 +124,58 @@ function formatTimestamp(epochSeconds?: number) {
   return new Date(epochSeconds * 1000).toLocaleTimeString();
 }
 
+function decodeToolName(toolName: string) {
+  if (toolName.startsWith("mcp_") && toolName.includes("__")) {
+    const trimmed = toolName.replace(/^mcp_/, "");
+    const [server, name] = trimmed.split("__", 2);
+    return { label: `MCP ${server}/${name}`, source: "mcp", server, name };
+  }
+  return { label: toolName, source: "core", server: "", name: toolName };
+}
+
 function renderToolActivity(item: ToolActivity) {
+  const decoded = decodeToolName(item.toolName);
   const statusClass =
     item.status === "failed" || item.status === "denied"
       ? "error"
       : item.status === "completed" || item.status === "approved"
         ? "success"
-        : "message-tool-call";
+        : "pending";
   return (
-    <div key={item.toolCallId} className={`message-tool ${item.isError ? "error" : statusClass}`}>
-      <strong>{item.toolName}</strong>
+    <div key={item.toolCallId} className={`status-row ${item.isError ? "error" : statusClass}`}>
+      <strong>{decoded.label}</strong>
       <span>
         {item.status.toUpperCase()}
+        {decoded.source === "mcp" ? " · remote tool" : " · local tool"}
         {item.path ? ` · ${item.path}` : ""}
         {item.startedAt ? ` · ${formatTimestamp(item.completedAt ?? item.startedAt)}` : ""}
       </span>
+      {decoded.source === "mcp" && decoded.server && <small>Server: {decoded.server}</small>}
       {item.summary && <pre>{item.summary}</pre>}
       {item.output && <pre>{item.output}</pre>}
     </div>
   );
+}
+
+function statusTone(status: string) {
+  if (["failed", "denied", "tool_failed", "tool_denied", "model_failed", "offline"].includes(status)) {
+    return "error";
+  }
+  if (["completed", "approved", "assistant_resumed", "subtask_completed", "healthy"].includes(status)) {
+    return "success";
+  }
+  if (["awaiting_approval", "waiting_for_approval", "awaiting_tool", "running", "requested", "started", "loading", "degraded"].includes(status)) {
+    return "pending";
+  }
+  return "neutral";
+}
+
+function formatRuntimeHeadline(entry: string) {
+  const [headline, ...detail] = entry.split(" · ");
+  return {
+    headline: headline ?? "event",
+    detail: detail.join(" · ")
+  };
 }
 
 function buildCommandPrompt(command: CommandDefinition) {
@@ -216,6 +251,8 @@ export function App() {
   const [logs, setLogs] = useState<string[]>([]);
   const [runtimeEvents, setRuntimeEvents] = useState<string[]>([]);
   const [toolActivities, setToolActivities] = useState<ToolActivity[]>([]);
+  const [latestContinuation, setLatestContinuation] = useState<{ summaryMessageId?: string; compactedMessages?: number; recentMessages?: number; summaryDepth?: number } | null>(null);
+  const [latestApproval, setLatestApproval] = useState<{ toolName: string; status: string; path?: string; requestId?: string } | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticResult[]>([]);
   const [documentSymbols, setDocumentSymbols] = useState<DocumentSymbolResult[]>([]);
   const [workspaceSymbols, setWorkspaceSymbols] = useState<WorkspaceSymbolResult[]>([]);
@@ -225,6 +262,7 @@ export function App() {
   const [mcpServerStatuses, setMCPServerStatuses] = useState<MCPServerStatus[]>([]);
   const [repoContext, setRepoContext] = useState<RepoGraphSummary | null>(null);
   const [retrievalPreview, setRetrievalPreview] = useState<RepoRetrievalPreview | null>(null);
+  const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const [bootPhase, setBootPhase] = useState<BootPhase>(
     runtimeBootStatus === "healthy" ? "healthy" : runtimeBootStatus === "degraded" ? "degraded" : "loading"
   );
@@ -232,6 +270,7 @@ export function App() {
   const [authMessage, setAuthMessage] = useState("");
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus>(initialStatus(runtimeBootStatus, runtimeBootMessage));
   const eventSocketRef = useRef<WebSocket | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const safeSessions = safeArray(sessions);
   const safeMessages = safeArray(messages);
   const safeModels = safeArray(models);
@@ -273,6 +312,7 @@ export function App() {
       )
       .slice(0, 8);
   }, [prompt, safeCommands]);
+  const selectedCommandMatch = commandMatches[selectedCommandIndex] ?? commandMatches[0] ?? null;
 
   function pushLog(entry: string) {
     setLogs((current) => {
@@ -292,6 +332,43 @@ export function App() {
       }
       return [entry, ...safeCurrent].slice(0, 40);
     });
+  }
+
+  useEffect(() => {
+    setSelectedCommandIndex(0);
+  }, [prompt]);
+
+  function applyCommandSuggestion(command: CommandDefinition) {
+    setPrompt(buildCommandPrompt(command));
+    setSelectedCommandIndex(0);
+    window.setTimeout(() => composerRef.current?.focus(), 0);
+  }
+
+  function handlePromptKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (commandMatches.length === 0) {
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setSelectedCommandIndex((current) => (current + 1) % commandMatches.length);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setSelectedCommandIndex((current) => (current - 1 + commandMatches.length) % commandMatches.length);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setPrompt((current) => (current.trim().startsWith("/") ? current.split(" ")[0] : current));
+      return;
+    }
+    if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey && prompt.trim().startsWith("/"))) {
+      event.preventDefault();
+      if (selectedCommandMatch) {
+        applyCommandSuggestion(selectedCommandMatch);
+      }
+    }
   }
 
   useEffect(() => {
@@ -514,7 +591,7 @@ export function App() {
           status: string;
           message?: string;
           toolName?: string;
-          continuation?: { summaryMessageId?: string; compactedMessages?: number; recentMessages?: number } | null;
+          continuation?: { summaryMessageId?: string; compactedMessages?: number; recentMessages?: number; summaryDepth?: number } | null;
           subtask?: { title?: string; childSessionId?: string; status?: string } | null;
           time: number;
         };
@@ -523,13 +600,16 @@ export function App() {
           payload.toolName ? `tool=${payload.toolName}` : "",
           payload.message ?? "",
           payload.continuation?.summaryMessageId
-            ? `summary=${payload.continuation.summaryMessageId} compacted=${payload.continuation.compactedMessages ?? 0} recent=${payload.continuation.recentMessages ?? 0}`
+            ? `summary=${payload.continuation.summaryMessageId} depth=${payload.continuation.summaryDepth ?? 1} compacted=${payload.continuation.compactedMessages ?? 0} recent=${payload.continuation.recentMessages ?? 0}`
             : "",
           payload.subtask?.childSessionId ? `subtask=${payload.subtask.title ?? payload.subtask.childSessionId}` : ""
         ]
           .filter(Boolean)
           .join(" · ");
         pushRuntimeEvent(details);
+        if (payload.continuation?.summaryMessageId) {
+          setLatestContinuation(payload.continuation);
+        }
       }
 
       if (event.type === "message.delta") {
@@ -557,7 +637,14 @@ export function App() {
       }
 
       if (event.type === "permission.requested") {
-        setPendingPermission(event.data as PermissionRequest);
+        const request = event.data as PermissionRequest;
+        setPendingPermission(request);
+        setLatestApproval({
+          toolName: request.toolName,
+          status: "requested",
+          path: request.path,
+          requestId: request.id
+        });
       }
 
       if (event.type === "approval.updated") {
@@ -599,6 +686,12 @@ export function App() {
             return [updated, ...existing.filter((item) => item.toolCallId !== payload.toolCallId)].slice(0, 30);
           });
         }
+        setLatestApproval({
+          toolName: payload.toolName,
+          status: normalizedStatus,
+          path: payload.path,
+          requestId: payload.requestId
+        });
         pushRuntimeEvent(`${payload.toolName} approval ${normalizedStatus}${payload.path ? ` · ${payload.path}` : ""}`);
       }
 
@@ -863,6 +956,30 @@ export function App() {
     }
   }
 
+  async function handleWorkspaceDefinitions() {
+    if (!serviceStatus.serviceHealthy || authPhase !== "ready" || !repoPath) return;
+    try {
+      const items = safeArray(await getWorkspaceDefinitions(repoPath, workspaceSymbolQuery.trim() || undefined));
+      setDefinitions(items);
+      pushLog(`workspace definitions loaded: ${items.length}`);
+    } catch (error) {
+      pushLog(`workspace definitions unavailable: ${(error as Error).message}`);
+      setDefinitions([]);
+    }
+  }
+
+  async function handleWorkspaceReferences() {
+    if (!serviceStatus.serviceHealthy || authPhase !== "ready" || !repoPath) return;
+    try {
+      const items = safeArray(await getWorkspaceReferences(repoPath, workspaceSymbolQuery.trim() || undefined));
+      setReferences(items);
+      pushLog(`workspace references loaded: ${items.length}`);
+    } catch (error) {
+      pushLog(`workspace references unavailable: ${(error as Error).message}`);
+      setReferences([]);
+    }
+  }
+
   async function handleDefinitions() {
     if (!serviceStatus.serviceHealthy || authPhase !== "ready") return;
     const target = symbolPath.trim() || diagnosticPath.trim() || repoPath;
@@ -1022,18 +1139,20 @@ export function App() {
             </div>
             <div className="composer">
               <textarea
+                ref={composerRef}
                 value={prompt}
                 onChange={(event) => setPrompt(event.target.value)}
+                onKeyDown={handlePromptKeyDown}
                 placeholder="Ask the assistant to inspect, edit, or explain your codebase..."
                 disabled={composerDisabled}
               />
               {commandMatches.length > 0 && (
                 <div className="command-palette">
-                  {commandMatches.map((command: CommandDefinition) => (
+                  {commandMatches.map((command: CommandDefinition, index) => (
                     <button
                       key={command.id}
-                      className="command-option"
-                      onClick={() => setPrompt(buildCommandPrompt(command))}
+                      className={index === selectedCommandIndex ? "command-option active" : "command-option"}
+                      onClick={() => applyCommandSuggestion(command)}
                       disabled={composerDisabled}
                     >
                       <strong>/{command.id}</strong>
@@ -1068,9 +1187,11 @@ export function App() {
                 <div className="repo-summary">
                   <p>Indexed files: {repoContext.indexedFiles}</p>
                   <p>Reference edges: {repoContext.referenceEdges}</p>
+                  <p>Symbol reference edges: {repoContext.symbolReferenceEdges}</p>
                   <p>Touched files tracked: {repoContext.touchedFiles.length}</p>
                   <p>Child sessions: {repoContext.childSessions.length}</p>
                   <p>Lineage sessions: {repoContext.lineageSessions.length}</p>
+                  <p>Recent subtasks: {safeArray(repoContext.recentSubtasks).length}</p>
                   <p>Memory nodes: {repoContext.memories.length}</p>
                 </div>
               )}
@@ -1078,9 +1199,26 @@ export function App() {
             </div>
             <div className="card">
               <h3>Commands</h3>
+              {selectedCommandMatch && (
+                <div className="command-detail">
+                  <strong>/{selectedCommandMatch.id}</strong>
+                  <span>{selectedCommandMatch.description}</span>
+                  {selectedCommandMatch.usage && <code>{selectedCommandMatch.usage}</code>}
+                  {safeArray(selectedCommandMatch.arguments).length > 0 && (
+                    <div className="command-arguments">
+                      {safeArray(selectedCommandMatch.arguments).map((item) => (
+                        <span key={item.name} className={item.required ? "required" : ""}>
+                          {item.required ? "*" : ""}{item.name}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <small>Keyboard: ↑ ↓ to browse · Tab or Enter to apply · Esc to collapse</small>
+                </div>
+              )}
               <div className="command-list">
                 {safeCommands.slice(0, 10).map((command: CommandDefinition) => (
-                  <button key={command.id} className="command-list-item" onClick={() => setPrompt(buildCommandPrompt(command))}>
+                  <button key={command.id} className="command-list-item" onClick={() => applyCommandSuggestion(command)}>
                     <strong>/{command.id}</strong>
                     <span>{command.description}</span>
                     {command.usage && <code>{command.usage}</code>}
@@ -1156,6 +1294,12 @@ export function App() {
                 <button onClick={handleWorkspaceSymbols} disabled={!serviceStatus.serviceHealthy || authPhase !== "ready" || !repoPath}>
                   Workspace
                 </button>
+                <button onClick={handleWorkspaceDefinitions} disabled={!serviceStatus.serviceHealthy || authPhase !== "ready" || !repoPath}>
+                  WS Defs
+                </button>
+                <button onClick={handleWorkspaceReferences} disabled={!serviceStatus.serviceHealthy || authPhase !== "ready" || !repoPath}>
+                  WS Refs
+                </button>
                 <button onClick={handleDefinitions} disabled={!serviceStatus.serviceHealthy || authPhase !== "ready"}>
                   Definition
                 </button>
@@ -1188,11 +1332,22 @@ export function App() {
               <h3>MCP Tools</h3>
               <div className="mini-list">
                 {safeMCPServerStatuses.slice(0, 8).map((item, index) => (
-                  <pre key={`${item.server}-${index}`}>{`${item.server} [${item.transport}] reachable=${item.reachable} tools=${item.toolCount}${item.error ? `\n${item.error}` : ""}`}</pre>
+                  <div key={`${item.server}-${index}`} className={`status-row ${item.reachable ? "healthy" : "offline"}`}>
+                    <strong>{item.server}</strong>
+                    <span>{item.transport.toUpperCase()} · {item.reachable ? "reachable" : "offline"} · {item.toolCount} tools{item.latencyMs ? ` · ${item.latencyMs}ms` : ""}</span>
+                    {item.endpoint && <code>{item.endpoint}</code>}
+                    {item.detail && <small>{item.detail}</small>}
+                    {safeArray(item.toolNames).length > 0 && <small>{safeArray(item.toolNames).join(" · ")}</small>}
+                    {item.error && <pre>{item.error}</pre>}
+                  </div>
                 ))}
                 {safeMCPTools.length === 0 && <p>No MCP tools discovered.</p>}
                 {safeMCPTools.slice(0, 12).map((item, index) => (
-                  <pre key={`${item.server}-${item.name}-${index}`}>{`${item.server}/${item.name}${item.transport ? ` [${item.transport}]` : ""}\n${item.description ?? ""}`}</pre>
+                  <div key={`${item.server}-${item.name}-${index}`} className="status-row neutral">
+                    <strong>{decodeToolName(`mcp_${item.server}__${item.name}`).label}</strong>
+                    <span>{item.transport ? `${item.transport.toUpperCase()} transport` : "MCP tool"}</span>
+                    {item.description && <pre>{item.description}</pre>}
+                  </div>
                 ))}
               </div>
             </div>
@@ -1204,12 +1359,42 @@ export function App() {
               </div>
             </div>
             <div className="card">
+              <h3>Approvals</h3>
+              <div className="mini-list">
+                {!latestApproval && <p>No approval activity yet.</p>}
+                {latestApproval && (
+                  <div className={`status-row ${statusTone(latestApproval.status)}`}>
+                    <strong>{latestApproval.toolName}</strong>
+                    <span>{latestApproval.status.replaceAll("_", " ")}</span>
+                    {latestApproval.path && <code>{latestApproval.path}</code>}
+                    {pendingPermission?.description && latestApproval.requestId === pendingPermission.id && <small>{pendingPermission.description}</small>}
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="card">
               <h3>Runtime</h3>
               <div className="mini-list">
                 {safeRuntimeEvents.length === 0 && <p>No runtime state yet.</p>}
                 {safeRuntimeEvents.map((entry, index) => (
-                  <pre key={`${entry}-${index}`}>{entry}</pre>
+                  <div key={`${entry}-${index}`} className={`status-row ${statusTone(formatRuntimeHeadline(entry).headline)}`}>
+                    <strong>{formatRuntimeHeadline(entry).headline ?? "event"}</strong>
+                    {formatRuntimeHeadline(entry).detail && <span>{formatRuntimeHeadline(entry).detail}</span>}
+                    <pre>{entry}</pre>
+                  </div>
                 ))}
+              </div>
+            </div>
+            <div className="card">
+              <h3>Continuation</h3>
+              <div className="mini-list">
+                {!latestContinuation && <p>No continuation summary in use yet.</p>}
+                {latestContinuation && (
+                  <div className="status-row neutral">
+                    <strong>{latestContinuation.summaryMessageId ?? "summary"}</strong>
+                    <span>Depth: {latestContinuation.summaryDepth ?? 1} · Compacted: {latestContinuation.compactedMessages ?? 0} · Recent: {latestContinuation.recentMessages ?? 0}</span>
+                  </div>
+                )}
               </div>
             </div>
             <div className="card">
@@ -1224,12 +1409,15 @@ export function App() {
               <div className="card">
                 <h3>Repo Graph</h3>
                 <div className="mini-list">
-                  <pre>{`Repo: ${repoContext.repoPath}\nIndexed: ${repoContext.indexedFiles}\nReferences: ${repoContext.referenceEdges}`}</pre>
+                  <pre>{`Repo: ${repoContext.repoPath}\nIndexed: ${repoContext.indexedFiles}\nReferences: ${repoContext.referenceEdges}\nSymbol refs: ${repoContext.symbolReferenceEdges}`}</pre>
                   {repoContext.touchedFiles.slice(0, 8).map((item, index) => (
                     <pre key={`${item}-${index}`}>{item}</pre>
                   ))}
                   {repoContext.childSessions.slice(0, 6).map((item, index) => (
                     <pre key={`${item}-${index}`}>{`child session: ${item}`}</pre>
+                  ))}
+                  {safeArray(repoContext.recentSubtasks).slice(0, 4).map((item, index) => (
+                    <pre key={`${item.sessionId}-${index}`}>{`subtask: ${item.title}\n${item.summary}`}</pre>
                   ))}
                   {repoContext.lineageSessions.slice(0, 6).map((item, index) => (
                     <pre key={`${item}-${index}`}>{`lineage session: ${item}`}</pre>
@@ -1301,3 +1489,5 @@ export function App() {
     </div>
   );
 }
+
+

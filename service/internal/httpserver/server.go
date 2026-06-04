@@ -46,6 +46,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/diagnostics", s.withAuth(s.handleDiagnostics))
 	mux.HandleFunc("/api/lsp/symbols", s.withAuth(s.handleDocumentSymbols))
 	mux.HandleFunc("/api/lsp/workspace-symbols", s.withAuth(s.handleWorkspaceSymbols))
+	mux.HandleFunc("/api/lsp/workspace-definitions", s.withAuth(s.handleWorkspaceDefinitions))
+	mux.HandleFunc("/api/lsp/workspace-references", s.withAuth(s.handleWorkspaceReferences))
 	mux.HandleFunc("/api/lsp/definition", s.withAuth(s.handleDefinition))
 	mux.HandleFunc("/api/lsp/references", s.withAuth(s.handleReferences))
 	mux.HandleFunc("/api/mcp/tools", s.withAuth(s.handleMCPTools))
@@ -425,6 +427,36 @@ func (s *Server) handleWorkspaceSymbols(w http.ResponseWriter, r *http.Request) 
 	items, err := s.app.WorkspaceSymbols(r.Context(), repoPath, query)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, "lsp_workspace_symbols_failed", err.Error(), "")
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) handleWorkspaceDefinitions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	repoPath := r.URL.Query().Get("repoPath")
+	query := r.URL.Query().Get("query")
+	items, err := s.app.WorkspaceDefinitions(r.Context(), repoPath, query)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "lsp_workspace_definitions_failed", err.Error(), "")
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) handleWorkspaceReferences(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	repoPath := r.URL.Query().Get("repoPath")
+	query := r.URL.Query().Get("query")
+	items, err := s.app.WorkspaceReferences(r.Context(), repoPath, query)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "lsp_workspace_references_failed", err.Error(), "")
 		return
 	}
 	writeJSON(w, http.StatusOK, items)

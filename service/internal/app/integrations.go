@@ -33,6 +33,14 @@ type RepoRetrievalPreview struct {
 	Snippets      []string            `json:"snippets"`
 }
 
+type retrievalSignals struct {
+	PromptTokens      []string
+	RecentTokens      []string
+	SummaryTokens     []string
+	RecentMessageText string
+	SummaryText       string
+}
+
 func (a *App) availableTools(repoPath string) []ollama.Tool {
 	tools := []ollama.Tool{
 		toolSchema("get_status", "Get backend dependency status", map[string]any{"type": "object", "properties": map[string]any{}}),
@@ -119,6 +127,18 @@ func (a *App) availableTools(repoPath string) []ollama.Tool {
 			},
 		}),
 		toolSchema("lsp_workspace_symbols", "Search workspace symbols for the active repository", map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"query": map[string]any{"type": "string"},
+			},
+		}),
+		toolSchema("lsp_workspace_definitions", "Find definitions across the active repository for matching workspace symbols", map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"query": map[string]any{"type": "string"},
+			},
+		}),
+		toolSchema("lsp_workspace_references", "Find references across the active repository for matching workspace symbols", map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"query": map[string]any{"type": "string"},
@@ -304,6 +324,73 @@ func (a *App) WorkspaceSymbols(ctx context.Context, repoPath string, query strin
 	return items, nil
 }
 
+func (a *App) WorkspaceDefinitions(ctx context.Context, repoPath string, query string) ([]lsp.Location, error) {
+	symbols, err := a.WorkspaceSymbols(ctx, repoPath, query)
+	if err != nil {
+		return nil, err
+	}
+	unique := map[string]lsp.Location{}
+	for _, symbol := range symbols[:minInt(len(symbols), 8)] {
+		items, itemErr := a.Definitions(ctx, symbol.Path, repoPath, symbol.Line, symbol.Character)
+		if itemErr != nil {
+			continue
+		}
+		for _, item := range items {
+			key := fmt.Sprintf("%s:%d:%d", item.Path, item.Line, item.Character)
+			if _, ok := unique[key]; ok {
+				continue
+			}
+			unique[key] = item
+			if len(unique) >= 30 {
+				return sortLocations(unique), nil
+			}
+		}
+	}
+	return sortLocations(unique), nil
+}
+
+func (a *App) WorkspaceReferences(ctx context.Context, repoPath string, query string) ([]lsp.Location, error) {
+	symbols, err := a.WorkspaceSymbols(ctx, repoPath, query)
+	if err != nil {
+		return nil, err
+	}
+	unique := map[string]lsp.Location{}
+	for _, symbol := range symbols[:minInt(len(symbols), 6)] {
+		items, itemErr := a.References(ctx, symbol.Path, repoPath, symbol.Line, symbol.Character)
+		if itemErr != nil {
+			continue
+		}
+		for _, item := range items {
+			key := fmt.Sprintf("%s:%d:%d", item.Path, item.Line, item.Character)
+			if _, ok := unique[key]; ok {
+				continue
+			}
+			unique[key] = item
+			if len(unique) >= 40 {
+				return sortLocations(unique), nil
+			}
+		}
+	}
+	return sortLocations(unique), nil
+}
+
+func sortLocations(items map[string]lsp.Location) []lsp.Location {
+	locations := make([]lsp.Location, 0, len(items))
+	for _, item := range items {
+		locations = append(locations, item)
+	}
+	sort.Slice(locations, func(i, j int) bool {
+		if locations[i].Path == locations[j].Path {
+			if locations[i].Line == locations[j].Line {
+				return locations[i].Character < locations[j].Character
+			}
+			return locations[i].Line < locations[j].Line
+		}
+		return locations[i].Path < locations[j].Path
+	})
+	return locations
+}
+
 func (a *App) listMCPTools(ctx context.Context, repoPath string) ([]mcp.ToolInfo, error) {
 	runtime := a.runtimeConfig(repoPath)
 	configs, err := mcp.LoadConfig(runtime.MCPConfigPath, repoPath)
@@ -343,20 +430,22 @@ func (a *App) MCPServerStatuses(ctx context.Context, repoPath string) ([]mcp.Ser
 func (a *App) RepoGraphSummary(ctx context.Context, repoPath string, sessionID string) (store.RepoGraphSummary, error) {
 	if a.Neo4j == nil {
 		return store.RepoGraphSummary{
-			RepoPath:           repoPath,
-			IndexedFiles:       0,
-			IndexedDirectories: 0,
-			ImportEdges:        0,
-			ReferenceEdges:     0,
-			SymbolCount:        0,
-			TouchedFiles:       []string{},
-			RelatedFiles:       []string{},
-			RelatedFileMatches: []store.FileMatch{},
-			RelatedMemoryMatch: []store.MemoryMatch{},
-			RelatedSymbols:     []store.SymbolMatch{},
-			ChildSessions:      []string{},
-			LineageSessions:    []string{},
-			Memories:           []store.MemorySummary{},
+			RepoPath:             repoPath,
+			IndexedFiles:         0,
+			IndexedDirectories:   0,
+			ImportEdges:          0,
+			ReferenceEdges:       0,
+			SymbolReferenceEdges: 0,
+			SymbolCount:          0,
+			TouchedFiles:         []string{},
+			RelatedFiles:         []string{},
+			RelatedFileMatches:   []store.FileMatch{},
+			RelatedMemoryMatch:   []store.MemoryMatch{},
+			RelatedSymbols:       []store.SymbolMatch{},
+			ChildSessions:        []string{},
+			LineageSessions:      []string{},
+			RecentSubtasks:       []store.SubtaskSummary{},
+			Memories:             []store.MemorySummary{},
 		}, ErrNeo4jUnavailable
 	}
 	return a.Neo4j.RepoGraphSummary(ctx, repoPath, sessionID)
@@ -366,30 +455,76 @@ func (a *App) RelevantRepoFiles(ctx context.Context, sessionID string, repoPath 
 	if a.Neo4j == nil || strings.TrimSpace(repoPath) == "" || strings.TrimSpace(prompt) == "" {
 		return []store.FileMatch{}, nil
 	}
-	tokens := promptTokens(prompt)
-	graphFiles, err := a.Neo4j.RelevantFiles(ctx, repoPath, tokens, 8)
+	signals := a.retrievalSignals(ctx, sessionID, prompt)
+	graphFiles, err := a.Neo4j.RelevantFiles(ctx, repoPath, signals.PromptTokens, 8)
 	if err != nil {
 		return nil, err
 	}
-	lineageFiles, err := a.Neo4j.RelevantTouchedFiles(ctx, sessionID, repoPath, tokens, 6)
+	lineageFiles, err := a.Neo4j.RelevantTouchedFiles(ctx, sessionID, repoPath, signals.PromptTokens, 6)
 	if err != nil {
 		return graphFiles, nil
 	}
-	return mergeRankedFileMatches(lineageFiles, graphFiles, 10), nil
+	recentFiles := []store.FileMatch{}
+	summaryFiles := []store.FileMatch{}
+	if len(signals.RecentTokens) > 0 {
+		if items, recentErr := a.Neo4j.RelevantFiles(ctx, repoPath, signals.RecentTokens, 6); recentErr == nil {
+			recentFiles = boostFileMatches(items, 4, "recent live work")
+		}
+	}
+	if len(signals.SummaryTokens) > 0 {
+		if items, summaryErr := a.Neo4j.RelevantFiles(ctx, repoPath, signals.SummaryTokens, 4); summaryErr == nil {
+			summaryFiles = boostFileMatches(items, 2, "continuation summary")
+		}
+	}
+	return mergeRankedFileMatches(recentFiles, summaryFiles, lineageFiles, graphFiles, 10), nil
 }
 
-func (a *App) RelevantRepoSymbols(ctx context.Context, repoPath string, prompt string) ([]store.SymbolMatch, error) {
+func (a *App) RelevantRepoSymbols(ctx context.Context, sessionID string, repoPath string, prompt string) ([]store.SymbolMatch, error) {
 	if a.Neo4j == nil || strings.TrimSpace(repoPath) == "" || strings.TrimSpace(prompt) == "" {
 		return []store.SymbolMatch{}, nil
 	}
-	return a.Neo4j.RelevantSymbols(ctx, repoPath, promptTokens(prompt), 10)
+	signals := a.retrievalSignals(ctx, sessionID, prompt)
+	promptMatches, err := a.Neo4j.RelevantSymbols(ctx, repoPath, signals.PromptTokens, 10)
+	if err != nil {
+		return nil, err
+	}
+	recentMatches := []store.SymbolMatch{}
+	summaryMatches := []store.SymbolMatch{}
+	if len(signals.RecentTokens) > 0 {
+		if items, recentErr := a.Neo4j.RelevantSymbols(ctx, repoPath, signals.RecentTokens, 6); recentErr == nil {
+			recentMatches = boostSymbolMatches(items, 4, "recent live work")
+		}
+	}
+	if len(signals.SummaryTokens) > 0 {
+		if items, summaryErr := a.Neo4j.RelevantSymbols(ctx, repoPath, signals.SummaryTokens, 4); summaryErr == nil {
+			summaryMatches = boostSymbolMatches(items, 2, "continuation summary")
+		}
+	}
+	return mergeRankedSymbolMatches(recentMatches, summaryMatches, promptMatches, 10), nil
 }
 
 func (a *App) RelevantSessionMemories(ctx context.Context, sessionID string, prompt string) ([]store.MemoryMatch, error) {
 	if a.Neo4j == nil || strings.TrimSpace(sessionID) == "" || strings.TrimSpace(prompt) == "" {
 		return []store.MemoryMatch{}, nil
 	}
-	return a.Neo4j.RelevantMemorySummaries(ctx, sessionID, promptTokens(prompt), 8)
+	signals := a.retrievalSignals(ctx, sessionID, prompt)
+	promptMatches, err := a.Neo4j.RelevantMemorySummaries(ctx, sessionID, signals.PromptTokens, 8)
+	if err != nil {
+		return nil, err
+	}
+	recentMatches := []store.MemoryMatch{}
+	summaryMatches := []store.MemoryMatch{}
+	if len(signals.RecentTokens) > 0 {
+		if items, recentErr := a.Neo4j.RelevantMemorySummaries(ctx, sessionID, signals.RecentTokens, 6); recentErr == nil {
+			recentMatches = boostMemoryMatches(items, 4, "recent live work")
+		}
+	}
+	if len(signals.SummaryTokens) > 0 {
+		if items, summaryErr := a.Neo4j.RelevantMemorySummaries(ctx, sessionID, signals.SummaryTokens, 4); summaryErr == nil {
+			summaryMatches = boostMemoryMatches(items, 2, "continuation summary")
+		}
+	}
+	return mergeRankedMemoryMatches(recentMatches, summaryMatches, promptMatches, 8), nil
 }
 
 func (a *App) RepoRetrievalPreview(ctx context.Context, sessionID string, repoPath string, prompt string) (store.RepoGraphSummary, []string, error) {
@@ -398,7 +533,7 @@ func (a *App) RepoRetrievalPreview(ctx context.Context, sessionID string, repoPa
 		return summary, nil, err
 	}
 	fileMatches, _ := a.RelevantRepoFiles(ctx, sessionID, repoPath, prompt)
-	symbolMatches, _ := a.RelevantRepoSymbols(ctx, repoPath, prompt)
+	symbolMatches, _ := a.RelevantRepoSymbols(ctx, sessionID, repoPath, prompt)
 	memoryMatches, _ := a.RelevantSessionMemories(ctx, sessionID, prompt)
 	summary.RelatedFileMatches = append([]store.FileMatch{}, fileMatches...)
 	summary.RelatedMemoryMatch = append([]store.MemoryMatch{}, memoryMatches...)
@@ -463,18 +598,24 @@ func (a *App) maybeCompactHistory(ctx context.Context, sessionID, model, repoPat
 		return history, nil, nil
 	}
 
-	summaryIndex := latestSummaryIndex(history)
+	session, _ := a.getSession(ctx, sessionID)
+	summaryIndex := activeSummaryIndex(session, history)
 	working := history
 	if summaryIndex >= 0 && summaryIndex+1 < len(history) {
 		working = history[summaryIndex+1:]
 	}
 	if len(working) <= limit {
 		if summaryIndex >= 0 {
-			return append([]domain.Message{history[summaryIndex]}, working...), nil, nil
+			continuation := continuationFromHistory(sessionID, session, history, history[summaryIndex], working)
+			return append([]domain.Message{history[summaryIndex]}, working...), continuation, nil
 		}
 		return history, nil, nil
 	}
 	if len(working) <= keep {
+		if summaryIndex >= 0 {
+			continuation := continuationFromHistory(sessionID, session, history, history[summaryIndex], working)
+			return append([]domain.Message{history[summaryIndex]}, working...), continuation, nil
+		}
 		return history, nil, nil
 	}
 
@@ -491,6 +632,7 @@ func (a *App) maybeCompactHistory(ctx context.Context, sessionID, model, repoPat
 		content.WriteString("\nExisting summary:\n")
 		content.WriteString(baseSummary)
 		content.WriteString("\n")
+		content.WriteString("Supersede that summary with a cleaner continuation head that keeps the important state without duplicating unchanged details.\n")
 	}
 	content.WriteString("\nConversation to summarize:\n")
 	for _, message := range older {
@@ -537,13 +679,14 @@ func (a *App) maybeCompactHistory(ctx context.Context, sessionID, model, repoPat
 		SessionID: sessionID,
 		Role:      domain.RoleAssistant,
 		Model:     model,
-		Parts: []domain.ContentPart{
-			{Type: "text", Text: autoCompactPrefix + "\n" + summaryText},
-			{Type: "finish", Reason: "stop", Time: time.Now().Unix()},
-		},
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
 	}
+	summaryMessage.Parts = append(summaryMessage.Parts, domain.ContentPart{Type: "text", Text: autoCompactPrefix + "\n" + summaryText})
+	if parentSummaryID != "" {
+		summaryMessage.Parts = append(summaryMessage.Parts, domain.ContentPart{Type: "summary_parent", Text: parentSummaryID})
+	}
+	summaryMessage.Parts = append(summaryMessage.Parts, domain.ContentPart{Type: "finish", Reason: "stop", Time: time.Now().Unix()})
 	if err := a.SaveMessage(ctx, summaryMessage); err != nil {
 		return history, nil, nil
 	}
@@ -560,6 +703,7 @@ func (a *App) maybeCompactHistory(ctx context.Context, sessionID, model, repoPat
 		SummaryParentMessageID: parentSummaryID,
 		SummaryFromMessageID:   fromMessageID,
 		SummaryToMessageID:     toMessageID,
+		SummaryDepth:           summaryDepth(history, parentSummaryID) + 1,
 		CompactedMessages:      len(older),
 		RecentMessages:         len(recent),
 		CreatedAt:              summaryMessage.CreatedAt,
@@ -582,6 +726,116 @@ func latestSummaryIndex(history []domain.Message) int {
 		}
 	}
 	return -1
+}
+
+func activeSummaryIndex(session domain.Session, history []domain.Message) int {
+	if strings.TrimSpace(session.SummaryMessageID) != "" {
+		for index, item := range history {
+			if item.ID == session.SummaryMessageID {
+				return index
+			}
+		}
+	}
+	return latestSummaryIndex(history)
+}
+
+func continuationFromHistory(sessionID string, session domain.Session, history []domain.Message, summary domain.Message, working []domain.Message) *domain.ContinuationState {
+	compacted := messageRangeSize(history, session.SummaryFromMessageID, session.SummaryToMessageID)
+	if compacted == 0 {
+		compacted = inferredCompactedCount(history, summary.ID, len(working))
+	}
+	return &domain.ContinuationState{
+		SessionID:              sessionID,
+		SummaryMessageID:       summary.ID,
+		SummaryParentMessageID: session.SummaryParentMessageID,
+		SummaryFromMessageID:   session.SummaryFromMessageID,
+		SummaryToMessageID:     session.SummaryToMessageID,
+		SummaryDepth:           summaryDepth(history, summary.ID),
+		CompactedMessages:      compacted,
+		RecentMessages:         len(working),
+		CreatedAt:              summary.CreatedAt,
+	}
+}
+
+func messageRangeSize(history []domain.Message, fromID, toID string) int {
+	if strings.TrimSpace(fromID) == "" || strings.TrimSpace(toID) == "" {
+		return 0
+	}
+	start := -1
+	end := -1
+	for index, item := range history {
+		if item.ID == fromID {
+			start = index
+		}
+		if item.ID == toID {
+			end = index
+		}
+	}
+	if start < 0 || end < start {
+		return 0
+	}
+	return end - start + 1
+}
+
+func inferredCompactedCount(history []domain.Message, summaryID string, recentCount int) int {
+	summaryIndex := -1
+	for index, item := range history {
+		if item.ID == summaryID {
+			summaryIndex = index
+			break
+		}
+	}
+	if summaryIndex < 0 {
+		return 0
+	}
+	remaining := len(history) - summaryIndex - 1
+	compacted := len(history) - remaining - 1
+	if recentCount > 0 && compacted > len(history)-recentCount-1 {
+		return len(history) - recentCount - 1
+	}
+	if compacted < 0 {
+		return 0
+	}
+	return compacted
+}
+
+func summaryDepth(history []domain.Message, summaryID string) int {
+	if strings.TrimSpace(summaryID) == "" {
+		return 0
+	}
+	byID := make(map[string]domain.Message, len(history))
+	for _, item := range history {
+		byID[item.ID] = item
+	}
+	depth := 0
+	current := summaryID
+	seen := make(map[string]struct{})
+	for strings.TrimSpace(current) != "" {
+		if _, ok := seen[current]; ok {
+			break
+		}
+		seen[current] = struct{}{}
+		message, ok := byID[current]
+		if !ok {
+			break
+		}
+		text := strings.TrimSpace(extractText(message.Parts))
+		if !strings.HasPrefix(text, autoCompactPrefix) {
+			break
+		}
+		depth++
+		current = summaryParentIDFromParts(message.Parts)
+	}
+	return depth
+}
+
+func summaryParentIDFromParts(parts []domain.ContentPart) string {
+	for _, part := range parts {
+		if part.Type == "summary_parent" {
+			return strings.TrimSpace(part.Text)
+		}
+	}
+	return ""
 }
 
 func diagnosticsText(items []lsp.Diagnostic) string {
@@ -711,6 +965,80 @@ func promptTokens(prompt string) []string {
 	return out
 }
 
+func (a *App) retrievalSignals(ctx context.Context, sessionID string, prompt string) retrievalSignals {
+	signals := retrievalSignals{PromptTokens: promptTokens(prompt)}
+	if strings.TrimSpace(sessionID) == "" {
+		return signals
+	}
+	history, err := a.ListMessages(ctx, sessionID)
+	if err != nil || len(history) == 0 {
+		return signals
+	}
+	summaryIndex := latestSummaryIndex(history)
+	if summaryIndex >= 0 {
+		signals.SummaryText = strings.TrimSpace(strings.TrimPrefix(extractText(history[summaryIndex].Parts), autoCompactPrefix))
+		signals.SummaryTokens = promptTokens(signals.SummaryText)
+	}
+	start := 0
+	if summaryIndex >= 0 {
+		start = summaryIndex + 1
+	}
+	working := history[start:]
+	if len(working) > 6 {
+		working = working[len(working)-6:]
+	}
+	var recentParts []string
+	for _, message := range working {
+		text := strings.TrimSpace(extractText(message.Parts))
+		if text == "" {
+			text = strings.TrimSpace(extractToolContent(message.Parts))
+		}
+		if text == "" {
+			continue
+		}
+		recentParts = append(recentParts, text)
+	}
+	signals.RecentMessageText = strings.Join(recentParts, "\n")
+	signals.RecentTokens = promptTokens(signals.RecentMessageText)
+	return signals
+}
+
+func boostFileMatches(items []store.FileMatch, boost int, reason string) []store.FileMatch {
+	boosted := make([]store.FileMatch, 0, len(items))
+	for _, item := range items {
+		item.Score += boost
+		if reason != "" {
+			item.Reasons = mergeUniqueStrings(item.Reasons, []string{reason})
+		}
+		boosted = append(boosted, item)
+	}
+	return boosted
+}
+
+func boostMemoryMatches(items []store.MemoryMatch, boost int, reason string) []store.MemoryMatch {
+	boosted := make([]store.MemoryMatch, 0, len(items))
+	for _, item := range items {
+		item.Score += boost
+		if reason != "" {
+			item.Reasons = mergeUniqueStrings(item.Reasons, []string{reason})
+		}
+		boosted = append(boosted, item)
+	}
+	return boosted
+}
+
+func boostSymbolMatches(items []store.SymbolMatch, boost int, reason string) []store.SymbolMatch {
+	boosted := make([]store.SymbolMatch, 0, len(items))
+	for _, item := range items {
+		item.Score += boost
+		if reason != "" {
+			item.Reasons = mergeUniqueStrings(item.Reasons, []string{reason})
+		}
+		boosted = append(boosted, item)
+	}
+	return boosted
+}
+
 func buildRepoContextPrompt(summary store.RepoGraphSummary, relevantFiles []store.FileMatch, relevantSymbols []store.SymbolMatch, relevantMemories []store.MemoryMatch) string {
 	if summary.RepoPath == "" {
 		return ""
@@ -721,6 +1049,7 @@ func buildRepoContextPrompt(summary store.RepoGraphSummary, relevantFiles []stor
 	out.WriteString(fmt.Sprintf("- indexed directories: %d\n", summary.IndexedDirectories))
 	out.WriteString(fmt.Sprintf("- import edges: %d\n", summary.ImportEdges))
 	out.WriteString(fmt.Sprintf("- reference edges: %d\n", summary.ReferenceEdges))
+	out.WriteString(fmt.Sprintf("- symbol reference edges: %d\n", summary.SymbolReferenceEdges))
 	out.WriteString(fmt.Sprintf("- symbols: %d\n", summary.SymbolCount))
 	if len(summary.TouchedFiles) > 0 {
 		out.WriteString("- recently tracked files:\n")
@@ -788,6 +1117,18 @@ func buildRepoContextPrompt(summary store.RepoGraphSummary, relevantFiles []stor
 		for _, item := range summary.LineageSessions[:minInt(len(summary.LineageSessions), 6)] {
 			out.WriteString("  - ")
 			out.WriteString(item)
+			out.WriteString("\n")
+		}
+	}
+	if len(summary.RecentSubtasks) > 0 {
+		out.WriteString("- recent subtasks:\n")
+		for _, item := range summary.RecentSubtasks[:minInt(len(summary.RecentSubtasks), 5)] {
+			out.WriteString("  - ")
+			out.WriteString(item.Title)
+			if strings.TrimSpace(item.Summary) != "" {
+				out.WriteString(": ")
+				out.WriteString(item.Summary)
+			}
 			out.WriteString("\n")
 		}
 	}
@@ -890,6 +1231,97 @@ func mergeRankedFileMatches(groups ...any) []store.FileMatch {
 	sort.SliceStable(result, func(i, j int) bool {
 		if result[i].Score == result[j].Score {
 			return result[i].Path < result[j].Path
+		}
+		return result[i].Score > result[j].Score
+	})
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	return result
+}
+
+func mergeRankedMemoryMatches(groups ...any) []store.MemoryMatch {
+	limit := 0
+	if len(groups) > 0 {
+		if typed, ok := groups[len(groups)-1].(int); ok {
+			limit = typed
+			groups = groups[:len(groups)-1]
+		}
+	}
+	merged := make(map[string]store.MemoryMatch)
+	for _, group := range groups {
+		items, ok := group.([]store.MemoryMatch)
+		if !ok {
+			continue
+		}
+		for _, item := range items {
+			if strings.TrimSpace(item.ID) == "" {
+				continue
+			}
+			existing, ok := merged[item.ID]
+			if !ok {
+				merged[item.ID] = item
+				continue
+			}
+			existing.Score += item.Score
+			existing.Reasons = mergeUniqueStrings(existing.Reasons, item.Reasons)
+			merged[item.ID] = existing
+		}
+	}
+	result := make([]store.MemoryMatch, 0, len(merged))
+	for _, item := range merged {
+		item.Reasons = item.Reasons[:minInt(len(item.Reasons), 4)]
+		result = append(result, item)
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].Score == result[j].Score {
+			return result[i].Label < result[j].Label
+		}
+		return result[i].Score > result[j].Score
+	})
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	return result
+}
+
+func mergeRankedSymbolMatches(groups ...any) []store.SymbolMatch {
+	limit := 0
+	if len(groups) > 0 {
+		if typed, ok := groups[len(groups)-1].(int); ok {
+			limit = typed
+			groups = groups[:len(groups)-1]
+		}
+	}
+	merged := make(map[string]store.SymbolMatch)
+	for _, group := range groups {
+		items, ok := group.([]store.SymbolMatch)
+		if !ok {
+			continue
+		}
+		for _, item := range items {
+			key := fmt.Sprintf("%s:%s:%d", item.FilePath, item.Name, item.Line)
+			existing, ok := merged[key]
+			if !ok {
+				merged[key] = item
+				continue
+			}
+			existing.Score += item.Score
+			existing.Reasons = mergeUniqueStrings(existing.Reasons, item.Reasons)
+			merged[key] = existing
+		}
+	}
+	result := make([]store.SymbolMatch, 0, len(merged))
+	for _, item := range merged {
+		item.Reasons = item.Reasons[:minInt(len(item.Reasons), 4)]
+		result = append(result, item)
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].Score == result[j].Score {
+			if result[i].FilePath == result[j].FilePath {
+				return result[i].Line < result[j].Line
+			}
+			return result[i].FilePath < result[j].FilePath
 		}
 		return result[i].Score > result[j].Score
 	})

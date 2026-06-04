@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -14,20 +15,28 @@ type Neo4jStore struct {
 }
 
 type RepoGraphSummary struct {
-	RepoPath           string          `json:"repoPath"`
-	IndexedFiles       int             `json:"indexedFiles"`
-	IndexedDirectories int             `json:"indexedDirectories"`
-	ImportEdges        int             `json:"importEdges"`
-	ReferenceEdges     int             `json:"referenceEdges"`
-	SymbolCount        int             `json:"symbolCount"`
-	TouchedFiles       []string        `json:"touchedFiles"`
-	RelatedFiles       []string        `json:"relatedFiles"`
-	RelatedFileMatches []FileMatch     `json:"relatedFileMatches,omitempty"`
-	RelatedMemoryMatch []MemoryMatch   `json:"relatedMemoryMatches,omitempty"`
-	RelatedSymbols     []SymbolMatch   `json:"relatedSymbols,omitempty"`
-	ChildSessions      []string        `json:"childSessions"`
-	LineageSessions    []string        `json:"lineageSessions"`
-	Memories           []MemorySummary `json:"memories"`
+	RepoPath             string           `json:"repoPath"`
+	IndexedFiles         int              `json:"indexedFiles"`
+	IndexedDirectories   int              `json:"indexedDirectories"`
+	ImportEdges          int              `json:"importEdges"`
+	ReferenceEdges       int              `json:"referenceEdges"`
+	SymbolReferenceEdges int              `json:"symbolReferenceEdges"`
+	SymbolCount          int              `json:"symbolCount"`
+	TouchedFiles         []string         `json:"touchedFiles"`
+	RelatedFiles         []string         `json:"relatedFiles"`
+	RelatedFileMatches   []FileMatch      `json:"relatedFileMatches,omitempty"`
+	RelatedMemoryMatch   []MemoryMatch    `json:"relatedMemoryMatches,omitempty"`
+	RelatedSymbols       []SymbolMatch    `json:"relatedSymbols,omitempty"`
+	ChildSessions        []string         `json:"childSessions"`
+	LineageSessions      []string         `json:"lineageSessions"`
+	RecentSubtasks       []SubtaskSummary `json:"recentSubtasks,omitempty"`
+	Memories             []MemorySummary  `json:"memories"`
+}
+
+type SubtaskSummary struct {
+	SessionID string `json:"sessionId"`
+	Title     string `json:"title"`
+	Summary   string `json:"summary"`
 }
 
 type MemorySummary struct {
@@ -158,7 +167,8 @@ func (s *Neo4jStore) UpsertFileSymbols(ctx context.Context, filePath string, sym
 			}
 			_, err := tx.Run(ctx, `
 MERGE (f:File {path: $filePath})
-MERGE (s:Symbol {filePath: $filePath, name: $name, kind: $kind, line: $line})
+MERGE (s:Symbol {filePath: $filePath, name: $name, line: $line})
+SET s.kind = $kind
 MERGE (f)-[:DECLARES]->(s)
 `, map[string]any{
 				"filePath": filePath,
@@ -190,6 +200,49 @@ MERGE (from)-[r:REFERENCES {kind: $kind}]->(to)
 `, map[string]any{
 			"fromFilePath": fromFilePath,
 			"toFilePath":   toFilePath,
+			"kind":         kind,
+		})
+		return nil, err
+	})
+	return err
+}
+
+func (s *Neo4jStore) LinkSymbolReference(ctx context.Context, fromFilePath, fromName, fromKind string, fromLine int, toFilePath, toName, toKind string, toLine int, kind string) error {
+	if strings.TrimSpace(fromFilePath) == "" || strings.TrimSpace(toFilePath) == "" {
+		return nil
+	}
+	if fromLine <= 0 || toLine <= 0 {
+		return nil
+	}
+	if strings.TrimSpace(fromName) == "" {
+		fromName = fmt.Sprintf("symbol_%d", fromLine)
+	}
+	if strings.TrimSpace(toName) == "" {
+		toName = fmt.Sprintf("symbol_%d", toLine)
+	}
+	session := s.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: "neo4j"})
+	defer session.Close(ctx)
+
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		_, err := tx.Run(ctx, `
+MERGE (fromFile:File {path: $fromFilePath})
+MERGE (from:Symbol {filePath: $fromFilePath, name: $fromName, line: $fromLine})
+SET from.kind = CASE WHEN $fromKind <> "" THEN $fromKind ELSE coalesce(from.kind, "") END
+MERGE (fromFile)-[:DECLARES]->(from)
+MERGE (toFile:File {path: $toFilePath})
+MERGE (to:Symbol {filePath: $toFilePath, name: $toName, line: $toLine})
+SET to.kind = CASE WHEN $toKind <> "" THEN $toKind ELSE coalesce(to.kind, "") END
+MERGE (toFile)-[:DECLARES]->(to)
+MERGE (from)-[:REFERS_TO {kind: $kind}]->(to)
+`, map[string]any{
+			"fromFilePath": fromFilePath,
+			"fromName":     fromName,
+			"fromKind":     fromKind,
+			"fromLine":     fromLine,
+			"toFilePath":   toFilePath,
+			"toName":       toName,
+			"toKind":       toKind,
+			"toLine":       toLine,
 			"kind":         kind,
 		})
 		return nil, err
@@ -305,6 +358,7 @@ func (s *Neo4jStore) RepoGraphSummary(ctx context.Context, repoPath string, sess
 		RelatedSymbols:     []SymbolMatch{},
 		ChildSessions:      []string{},
 		LineageSessions:    []string{},
+		RecentSubtasks:     []SubtaskSummary{},
 		Memories:           []MemorySummary{},
 	}
 
@@ -315,7 +369,8 @@ OPTIONAL MATCH (d)-[:CONTAINS]->(f:File)
 OPTIONAL MATCH (f)-[imp:IMPORTS]->(:Import)
 OPTIONAL MATCH (f)-[:DECLARES]->(sym:Symbol)
 OPTIONAL MATCH (f)-[ref:REFERENCES]->(:File)
-RETURN count(DISTINCT d) AS directories, count(DISTINCT f) AS files, count(DISTINCT imp) AS imports, count(DISTINCT ref) AS references, count(DISTINCT sym) AS symbols, collect(DISTINCT f.path)[0..20] AS filePaths
+OPTIONAL MATCH (sym)-[symref:REFERS_TO]->(:Symbol)
+RETURN count(DISTINCT d) AS directories, count(DISTINCT f) AS files, count(DISTINCT imp) AS imports, count(DISTINCT ref) AS references, count(DISTINCT symref) AS symbolReferences, count(DISTINCT sym) AS symbols, collect(DISTINCT f.path)[0..20] AS filePaths
 `, map[string]any{"repoPath": repoPath})
 		if err != nil {
 			return nil, err
@@ -323,18 +378,19 @@ RETURN count(DISTINCT d) AS directories, count(DISTINCT f) AS files, count(DISTI
 		if result.Next(ctx) {
 			return result.Record().Values, nil
 		}
-		return []any{int64(0), int64(0), int64(0), int64(0), int64(0), []any{}}, result.Err()
+		return []any{int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), []any{}}, result.Err()
 	})
 	if err != nil {
 		return summary, err
 	}
-	if values, ok := statsResult.([]any); ok && len(values) >= 6 {
+	if values, ok := statsResult.([]any); ok && len(values) >= 7 {
 		summary.IndexedDirectories = intFromAny(values[0])
 		summary.IndexedFiles = intFromAny(values[1])
 		summary.ImportEdges = intFromAny(values[2])
 		summary.ReferenceEdges = intFromAny(values[3])
-		summary.SymbolCount = intFromAny(values[4])
-		summary.TouchedFiles = append(summary.TouchedFiles, stringSliceFromAny(values[5])...)
+		summary.SymbolReferenceEdges = intFromAny(values[4])
+		summary.SymbolCount = intFromAny(values[5])
+		summary.TouchedFiles = append(summary.TouchedFiles, stringSliceFromAny(values[6])...)
 	}
 
 	memoriesResult, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
@@ -439,6 +495,52 @@ LIMIT 12
 	if items, ok := lineageSessionsResult.([]string); ok {
 		summary.LineageSessions = items
 	}
+	subtasksResult, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		query := `
+MATCH (session:Session)-[:REMEMBERS]->(m:Memory)
+WHERE m.kind = 'subtask'
+RETURN session.id AS sessionId, coalesce(session.title, session.id) AS title, m.label AS summary
+LIMIT 8
+`
+		params := map[string]any{}
+		if strings.TrimSpace(sessionID) != "" {
+			query = `
+MATCH (root:Session {id: $sessionId})
+OPTIONAL MATCH (root)-[:CHILD_OF*0..4]->(ancestor:Session)
+OPTIONAL MATCH (descendant:Session)-[:CHILD_OF*1..4]->(root)
+WITH collect(DISTINCT root) + collect(DISTINCT ancestor) + collect(DISTINCT descendant) AS sessions
+UNWIND sessions AS session
+MATCH (session)-[:REMEMBERS]->(m:Memory)
+WHERE m.kind = 'subtask'
+RETURN DISTINCT session.id AS sessionId, coalesce(session.title, session.id) AS title, m.label AS summary
+LIMIT 8
+`
+			params["sessionId"] = sessionID
+		}
+		result, err := tx.Run(ctx, query, params)
+		if err != nil {
+			return nil, err
+		}
+		items := make([]SubtaskSummary, 0)
+		for result.Next(ctx) {
+			record := result.Record()
+			sessionValue, _ := record.Get("sessionId")
+			titleValue, _ := record.Get("title")
+			summaryValue, _ := record.Get("summary")
+			items = append(items, SubtaskSummary{
+				SessionID: stringifyValue(sessionValue),
+				Title:     stringifyValue(titleValue),
+				Summary:   stringifyValue(summaryValue),
+			})
+		}
+		return items, result.Err()
+	})
+	if err != nil {
+		return summary, err
+	}
+	if items, ok := subtasksResult.([]SubtaskSummary); ok {
+		summary.RecentSubtasks = items
+	}
 	sort.Strings(summary.TouchedFiles)
 	return summary, nil
 }
@@ -524,16 +626,21 @@ MATCH (session)-[:TOUCHED]->(f:File)
 WHERE startsWith(f.path, $repoPath)
 OPTIONAL MATCH (f)-[outRef:REFERENCES]->(:File)
 OPTIONAL MATCH (:File)-[inRef:REFERENCES]->(f)
+OPTIONAL MATCH (f)-[:DECLARES]->(decl:Symbol)
+OPTIONAL MATCH (decl)-[outSymRef:REFERS_TO]->(:Symbol)
+OPTIONAL MATCH (:Symbol)-[inSymRef:REFERS_TO]->(decl)
 WITH f,
 reduce(score = 0, token IN $tokens |
   score +
   CASE WHEN toLower(f.path) CONTAINS token THEN 3 ELSE 0 END +
   CASE WHEN toLower(f.name) CONTAINS token THEN 5 ELSE 0 END
-) + count(DISTINCT outRef) + count(DISTINCT inRef) AS score,
+) + count(DISTINCT outRef) + count(DISTINCT inRef) + count(DISTINCT outSymRef) + count(DISTINCT inSymRef) AS score,
 count(DISTINCT outRef) AS outRefs,
-count(DISTINCT inRef) AS inRefs
+count(DISTINCT inRef) AS inRefs,
+count(DISTINCT outSymRef) AS outSymRefs,
+count(DISTINCT inSymRef) AS inSymRefs
 WHERE score > 0
-RETURN DISTINCT f.path AS path, score, outRefs, inRefs
+RETURN DISTINCT f.path AS path, score, outRefs, inRefs, outSymRefs, inSymRefs
 ORDER BY score DESC, f.path ASC
 LIMIT $limit
 `, map[string]any{
@@ -552,10 +659,12 @@ LIMIT $limit
 			score, _ := record.Get("score")
 			outRefs, _ := record.Get("outRefs")
 			inRefs, _ := record.Get("inRefs")
+			outSymRefs, _ := record.Get("outSymRefs")
+			inSymRefs, _ := record.Get("inSymRefs")
 			items = append(items, FileMatch{
 				Path:    stringifyValue(path),
 				Score:   intFromAny(score),
-				Reasons: fileReasons(stringifyValue(path), tokens, intFromAny(outRefs), intFromAny(inRefs), true),
+				Reasons: fileReasons(stringifyValue(path), tokens, intFromAny(outRefs), intFromAny(inRefs), intFromAny(outSymRefs), intFromAny(inSymRefs), true),
 				Source:  "session-lineage",
 			})
 		}
@@ -583,7 +692,9 @@ MATCH (r:Repository {path: $repoPath})-[:CONTAINS]->(:Directory)-[:CONTAINS]->(f
 OPTIONAL MATCH (f)-[:DECLARES]->(sym:Symbol)
 OPTIONAL MATCH (f)-[outRef:REFERENCES]->(:File)
 OPTIONAL MATCH (:File)-[inRef:REFERENCES]->(f)
-WITH f, collect(toLower(sym.name)) AS symbolNames, count(DISTINCT outRef) AS outRefs, count(DISTINCT inRef) AS inRefs,
+OPTIONAL MATCH (sym)-[outSymRef:REFERS_TO]->(:Symbol)
+OPTIONAL MATCH (:Symbol)-[inSymRef:REFERS_TO]->(sym)
+WITH f, collect(toLower(sym.name)) AS symbolNames, count(DISTINCT outRef) AS outRefs, count(DISTINCT inRef) AS inRefs, count(DISTINCT outSymRef) AS outSymRefs, count(DISTINCT inSymRef) AS inSymRefs,
 reduce(score = 0, token IN $tokens |
   score +
   CASE
@@ -602,9 +713,9 @@ reduce(score = 0, token IN $tokens |
     WHEN any(symbolName IN symbolNames WHERE symbolName CONTAINS token) THEN 6
     ELSE 0
   END
-) + count(DISTINCT outRef) + count(DISTINCT inRef) AS score
+) + count(DISTINCT outRef) + count(DISTINCT inRef) + count(DISTINCT outSymRef) + count(DISTINCT inSymRef) AS score
 WHERE score > 0
-RETURN f.path AS path, score, outRefs, inRefs
+RETURN f.path AS path, score, outRefs, inRefs, outSymRefs, inSymRefs
 ORDER BY score DESC, f.path ASC
 LIMIT $limit
 `
@@ -623,10 +734,12 @@ LIMIT $limit
 			score, _ := record.Get("score")
 			outRefs, _ := record.Get("outRefs")
 			inRefs, _ := record.Get("inRefs")
+			outSymRefs, _ := record.Get("outSymRefs")
+			inSymRefs, _ := record.Get("inSymRefs")
 			items = append(items, FileMatch{
 				Path:    stringifyValue(path),
 				Score:   intFromAny(score),
-				Reasons: fileReasons(stringifyValue(path), tokens, intFromAny(outRefs), intFromAny(inRefs), false),
+				Reasons: fileReasons(stringifyValue(path), tokens, intFromAny(outRefs), intFromAny(inRefs), intFromAny(outSymRefs), intFromAny(inSymRefs), false),
 				Source:  "repo-graph",
 			})
 		}
@@ -650,15 +763,17 @@ func (s *Neo4jStore) RelevantSymbols(ctx context.Context, repoPath string, token
 	result, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
 		query := `
 MATCH (r:Repository {path: $repoPath})-[:CONTAINS]->(:Directory)-[:CONTAINS]->(f:File)-[:DECLARES]->(sym:Symbol)
-WITH f, sym,
+OPTIONAL MATCH (sym)-[outRef:REFERS_TO]->(:Symbol)
+OPTIONAL MATCH (:Symbol)-[inRef:REFERS_TO]->(sym)
+WITH f, sym, count(DISTINCT outRef) AS outRefs, count(DISTINCT inRef) AS inRefs,
 reduce(score = 0, token IN $tokens |
   score +
   CASE WHEN toLower(sym.name) CONTAINS token THEN 8 ELSE 0 END +
   CASE WHEN toLower(sym.kind) CONTAINS token THEN 2 ELSE 0 END +
   CASE WHEN toLower(f.path) CONTAINS token THEN 2 ELSE 0 END
-) AS score
+) + count(DISTINCT outRef) + count(DISTINCT inRef) AS score
 WHERE score > 0
-RETURN f.path AS filePath, sym.name AS name, sym.kind AS kind, sym.line AS line, score
+RETURN f.path AS filePath, sym.name AS name, sym.kind AS kind, sym.line AS line, score, outRefs, inRefs
 ORDER BY score DESC, f.path ASC, sym.line ASC
 LIMIT $limit
 `
@@ -678,13 +793,15 @@ LIMIT $limit
 			kind, _ := record.Get("kind")
 			line, _ := record.Get("line")
 			score, _ := record.Get("score")
+			outRefs, _ := record.Get("outRefs")
+			inRefs, _ := record.Get("inRefs")
 			items = append(items, SymbolMatch{
 				FilePath: stringifyValue(filePath),
 				Name:     stringifyValue(name),
 				Kind:     stringifyValue(kind),
 				Line:     intFromAny(line),
 				Score:    intFromAny(score),
-				Reasons:  symbolReasons(stringifyValue(name), stringifyValue(kind), stringifyValue(filePath), tokens),
+				Reasons:  symbolReasons(stringifyValue(name), stringifyValue(kind), stringifyValue(filePath), tokens, intFromAny(outRefs), intFromAny(inRefs)),
 			})
 		}
 		return items, rows.Err()
@@ -731,7 +848,7 @@ func stringifyValue(value any) string {
 	return text
 }
 
-func fileReasons(path string, tokens []string, outRefs, inRefs int, touched bool) []string {
+func fileReasons(path string, tokens []string, outRefs, inRefs, outSymRefs, inSymRefs int, touched bool) []string {
 	reasons := make([]string, 0, 6)
 	loweredPath := strings.ToLower(path)
 	base := strings.ToLower(filepath.Base(path))
@@ -748,6 +865,9 @@ func fileReasons(path string, tokens []string, outRefs, inRefs int, touched bool
 	}
 	if outRefs > 0 || inRefs > 0 {
 		reasons = append(reasons, "connected by reference graph")
+	}
+	if outSymRefs > 0 || inSymRefs > 0 {
+		reasons = append(reasons, "connected by symbol graph")
 	}
 	return uniqueReasonList(reasons)
 }
@@ -767,7 +887,7 @@ func memoryReasons(kind, label string, tokens []string) []string {
 	return uniqueReasonList(reasons)
 }
 
-func symbolReasons(name, kind, path string, tokens []string) []string {
+func symbolReasons(name, kind, path string, tokens []string, outRefs, inRefs int) []string {
 	reasons := make([]string, 0, 5)
 	loweredName := strings.ToLower(name)
 	loweredKind := strings.ToLower(kind)
@@ -781,6 +901,9 @@ func symbolReasons(name, kind, path string, tokens []string) []string {
 		case strings.Contains(loweredPath, token):
 			reasons = append(reasons, "file path mentions "+token)
 		}
+	}
+	if outRefs > 0 || inRefs > 0 {
+		reasons = append(reasons, "linked in symbol reference graph")
 	}
 	return uniqueReasonList(reasons)
 }

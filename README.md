@@ -93,13 +93,16 @@ MCP transport support in this desktop runtime:
 
 - `stdio` supported
 - `http` supported for JSON-RPC style MCP endpoints
-- `sse` reported clearly as not yet supported
+- `sse` supported for event-stream MCP servers that expose a message endpoint
+- MCP configs may now set `timeoutMs` and optional SSE `messageUrl` overrides
 
 New built-in commands:
 
 - `/diagnostics <file-path>` runs LSP diagnostics for a file
 - `/symbols <file-path>` lists LSP document symbols
 - `/workspace-symbols [query]` searches symbols across the active repository
+- `/workspace-definitions [query]` expands matching workspace symbols into definitions across the active repository
+- `/workspace-references [query]` expands matching workspace symbols into references across the active repository
 - `/definition <path> <line> <character>` finds an LSP definition
 - `/references <path> <line> <character>` finds LSP references
 - `/mcp` lists configured MCP tools
@@ -116,6 +119,11 @@ New built-in commands:
 - `apply_patch` can target multiple files when the patch body includes `*** FILE: <path>` sections
 - the tool activity panel now shows richer per-tool status, path, summary, and output details
 - the desktop utility column now also shows a retrieval preview with ranked files, symbols, memories, and snippets for the current prompt
+- slash commands now support keyboard selection in the composer with arrow keys, enter/tab apply, and a richer command detail preview
+- MCP server status now shows endpoint/command, latency, and discovered tool names for faster debugging
+- MCP panels now surface remote-tool inventory more clearly, including SSE-backed servers and richer runtime status rows
+- completed subtasks now write a parent-session summary and show up in repo graph lineage context
+- the desktop now shows dedicated Approval and Continuation cards so long-running sessions are easier to follow
 
 The agent tool loop can also call:
 
@@ -209,7 +217,7 @@ This repo now delivers a stronger OpenCode-style desktop core:
 - pasted-path analysis for local files and repositories
 - desktop command discovery for built-in and `.opencode/commands` custom commands
 - LSP diagnostics tool integration
-- LSP document symbols, definitions, and references endpoints
+- LSP document symbols, definitions, references, workspace-definitions, and workspace-references endpoints
 - MCP stdio tool discovery and invocation
 - auto-compact summary generation for long sessions
 - child-session subtask execution for focused nested runs
@@ -219,6 +227,9 @@ This repo now delivers a stronger OpenCode-style desktop core:
 - repo indexing now stores file metadata, directory relationships, and simple import edges for better context injection
 - repo indexing now also stores file-to-file reference edges resolved from local imports
 - repo indexing now also stores simple symbols and injects prompt-relevant code snippets into agent context
+- repo indexing now also enriches symbol-to-symbol reference edges from LSP definition/reference lookups when available
 - edit/apply-patch runtime for safer file mutations, multi-file patching, `Begin Patch`-style envelopes, diff previews, and richer tool result/activity rendering
+- continuation retrieval now prefers recent live work, then the active summary head, then older lineage memories when ranking context
+- completed child subtasks now feed back into parent-session memory and repo-graph summaries for follow-up prompts
 
 See `PARITY.md` for the live parity matrix, including what is implemented, partially implemented, and still missing for deeper OpenCode behavioral parity.

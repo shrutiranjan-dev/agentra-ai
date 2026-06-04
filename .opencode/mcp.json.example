@@ -9,6 +9,14 @@
     "example-http": {
       "transport": "http",
       "url": "http://127.0.0.1:9000/mcp",
+      "timeoutMs": 5000,
+      "headers": {}
+    },
+    "example-sse": {
+      "transport": "sse",
+      "url": "http://127.0.0.1:9001/sse",
+      "messageUrl": "/messages",
+      "timeoutMs": 8000,
       "headers": {}
     }
   }

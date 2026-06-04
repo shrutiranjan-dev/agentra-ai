@@ -16,6 +16,7 @@ import (
 	"github.com/shruti-ranjan-maji/personal-assistant/service/internal/config"
 	"github.com/shruti-ranjan-maji/personal-assistant/service/internal/domain"
 	"github.com/shruti-ranjan-maji/personal-assistant/service/internal/events"
+	"github.com/shruti-ranjan-maji/personal-assistant/service/internal/lsp"
 	"github.com/shruti-ranjan-maji/personal-assistant/service/internal/ollama"
 	"github.com/shruti-ranjan-maji/personal-assistant/service/internal/store"
 	"github.com/shruti-ranjan-maji/personal-assistant/service/internal/tools"
@@ -26,6 +27,7 @@ var (
 	ErrNeo4jUnavailable  = errors.New("neo4j dependency unavailable")
 	ErrPermissionDenied  = errors.New("permission denied")
 	ErrMalformedToolCall = errors.New("malformed tool call")
+	ErrToolLoopStalled   = errors.New("tool loop stalled after repeated unsuccessful attempts")
 )
 
 type Status struct {
@@ -74,6 +76,13 @@ type applyPatchResult struct {
 	preview   string
 	summary   string
 	oldExists bool
+}
+
+type indexedSymbol struct {
+	Name      string
+	Kind      string
+	Line      int
+	Character int
 }
 
 func New(ctx context.Context, cfg config.Config) (*App, error) {
@@ -342,6 +351,23 @@ func (a *App) RunSubtask(ctx context.Context, parentSessionID, parentRunID, mode
 		return domain.SubtaskResult{}, err
 	}
 	link.Status = "completed"
+	link.Summary = truncateText(strings.TrimSpace(extractTextParts(message.Parts)), 1200)
+	if strings.TrimSpace(parentSessionID) != "" {
+		parentText := fmt.Sprintf("Subtask completed: %s\nChild session: %s", session.Title, session.ID)
+		if strings.TrimSpace(link.Summary) != "" {
+			parentText += "\nSummary:\n" + link.Summary
+		}
+		_, _ = a.saveAssistantTextMessage(ctx, parentSessionID, model, parentText, "stop")
+	}
+	if a.Neo4j != nil {
+		subtaskMemoryID := uuid.NewString()
+		label := fmt.Sprintf("%s: %s", session.Title, truncateText(strings.TrimSpace(extractTextParts(message.Parts)), 400))
+		_ = a.Neo4j.UpsertMemoryNode(ctx, subtaskMemoryID, "subtask", label)
+		_ = a.Neo4j.LinkMemoryToSession(ctx, subtaskMemoryID, session.ID)
+		if strings.TrimSpace(parentSessionID) != "" {
+			_ = a.Neo4j.LinkMemoryToSession(ctx, subtaskMemoryID, parentSessionID)
+		}
+	}
 	a.Hub.Broadcast(events.Event{
 		Type: "run.status",
 		Data: map[string]any{
@@ -388,7 +414,7 @@ func (a *App) runLLMFlow(ctx context.Context, sessionID, model, repoPath, prompt
 	if repoPath != "" {
 		repoSummary, _ := a.RepoGraphSummary(ctx, repoPath, sessionID)
 		relevantFiles, _ := a.RelevantRepoFiles(ctx, sessionID, repoPath, prompt)
-		relevantSymbols, _ := a.RelevantRepoSymbols(ctx, repoPath, prompt)
+		relevantSymbols, _ := a.RelevantRepoSymbols(ctx, sessionID, repoPath, prompt)
 		relevantMemories, _ := a.RelevantSessionMemories(ctx, sessionID, prompt)
 		if len(relevantMemories) > 0 {
 			repoSummary.Memories = make([]store.MemorySummary, 0, len(relevantMemories))
@@ -423,6 +449,7 @@ func (a *App) runLLMFlow(ctx context.Context, sessionID, model, repoPath, prompt
 	}
 	ollamaMessages = append(ollamaMessages, a.toOllamaMessages(history)...)
 
+	unproductiveToolLoops := 0
 	for toolLoop := 0; toolLoop < 6; toolLoop++ {
 		result, err := a.Ollama.Chat(ctx, model, ollamaMessages, a.availableTools(repoPath))
 		if err != nil {
@@ -498,6 +525,7 @@ func (a *App) runLLMFlow(ctx context.Context, sessionID, model, repoPath, prompt
 		}
 		a.Hub.Broadcast(events.Event{Type: "message.completed", Data: assistantToolMessage})
 
+		successfulToolCalls := 0
 		for index, call := range result.ToolCalls {
 			callMeta := toolRunMeta{
 				runID:      runID,
@@ -510,17 +538,17 @@ func (a *App) runLLMFlow(ctx context.Context, sessionID, model, repoPath, prompt
 			}
 			toolOutput, execErr := a.executeToolCall(ctx, sessionID, model, repoPath, call, callMeta)
 			if index < len(assistantToolMessage.Parts) {
-				if execErr != nil {
-					assistantToolMessage.Parts[index].Status = "failed"
-				} else {
-					assistantToolMessage.Parts[index].Status = "completed"
-				}
+				assistantToolMessage.Parts[index].Status = toolExecutionStatus(execErr)
 			}
 			resultContent := formatToolResult(callMeta.toolName, toolOutput, execErr)
 			if errors.Is(execErr, ErrPermissionDenied) {
 				a.emitRunStatus(sessionID, runID, "tool_denied", fmt.Sprintf("tool denied: %s", callMeta.toolName), callMeta.toolName, continuation, nil)
+			} else if errors.Is(execErr, ErrMalformedToolCall) {
+				a.emitRunStatus(sessionID, runID, "tool_malformed", fmt.Sprintf("malformed tool call: %s", callMeta.toolName), callMeta.toolName, continuation, nil)
 			} else if execErr != nil {
 				a.emitRunStatus(sessionID, runID, "tool_failed", fmt.Sprintf("tool failed: %s", callMeta.toolName), callMeta.toolName, continuation, nil)
+			} else {
+				successfulToolCalls++
 			}
 			toolMessage := domain.Message{
 				ID:        uuid.NewString(),
@@ -555,6 +583,17 @@ func (a *App) runLLMFlow(ctx context.Context, sessionID, model, repoPath, prompt
 		if err := a.SaveMessage(ctx, assistantToolMessage); err != nil {
 			a.emitRunStatus(sessionID, runID, "tool_failed", err.Error(), "", continuation, nil)
 			return domain.Message{}, err
+		}
+		unproductiveToolLoops = nextUnproductiveToolLoops(unproductiveToolLoops, len(result.ToolCalls), successfulToolCalls)
+		if shouldStopAfterToolLoop(unproductiveToolLoops) {
+			message, stopErr := a.saveAssistantTextMessage(ctx, sessionID, model, "Stopped after repeated unsuccessful tool attempts. Please correct the tool arguments, choose a different action, or continue without the blocked tool.", "stop")
+			if stopErr == nil {
+				a.emitRunStatus(sessionID, runID, "stopped_after_tool_failures", ErrToolLoopStalled.Error(), "", continuation, nil)
+				_ = a.updateSession(ctx, sessionID, func(session *domain.Session) {
+					session.LastRunStatus = "stopped_after_tool_failures"
+				})
+			}
+			return message, stopErr
 		}
 		a.emitRunStatus(sessionID, runID, "assistant_resumed", "assistant resumed after tool results", "", continuation, nil)
 		ollamaMessages = append(ollamaMessages, nextMessages...)
@@ -606,11 +645,17 @@ func toolSchema(name, description string, parameters map[string]any) ollama.Tool
 }
 
 func (a *App) executeToolCall(ctx context.Context, sessionID, model, repoPath string, call ollama.ToolCall, meta toolRunMeta) (string, error) {
+	toolName := strings.TrimSpace(call.Function.Name)
 	args := call.Function.Arguments
-	if strings.TrimSpace(call.Function.Name) == "" {
-		return "", ErrMalformedToolCall
+	if toolName == "" {
+		a.emitToolLifecycle(meta, "malformed", "missing tool name", true)
+		return "", fmt.Errorf("%w: missing tool name", ErrMalformedToolCall)
 	}
-	switch call.Function.Name {
+	if err := validateToolCall(toolName, args, repoPath); err != nil {
+		a.emitToolLifecycle(meta, "malformed", err.Error(), true)
+		return "", err
+	}
+	switch toolName {
 	case "get_status":
 		status := a.Status(ctx)
 		bytes, _ := json.Marshal(status)
@@ -711,6 +756,20 @@ func (a *App) executeToolCall(ctx context.Context, sessionID, model, repoPath st
 		}
 		bytes, _ := json.Marshal(items)
 		return string(bytes), nil
+	case "lsp_workspace_definitions":
+		items, err := a.WorkspaceDefinitions(ctx, repoPath, stringArg(args, "query", ""))
+		if err != nil {
+			return "", err
+		}
+		bytes, _ := json.Marshal(items)
+		return string(bytes), nil
+	case "lsp_workspace_references":
+		items, err := a.WorkspaceReferences(ctx, repoPath, stringArg(args, "query", ""))
+		if err != nil {
+			return "", err
+		}
+		bytes, _ := json.Marshal(items)
+		return string(bytes), nil
 	case "mcp_servers":
 		items, err := a.MCPServerStatuses(ctx, repoPath)
 		if err != nil {
@@ -727,10 +786,11 @@ func (a *App) executeToolCall(ctx context.Context, sessionID, model, repoPath st
 		}
 		return fmt.Sprintf("subtask session: %s\nsubtask title: %s\n%s", result.Session.ID, result.Session.Title, extractTextParts(result.Message.Parts)), nil
 	default:
-		if strings.HasPrefix(call.Function.Name, "mcp_") {
+		if strings.HasPrefix(toolName, "mcp_") {
 			return a.executeMCPTool(ctx, repoPath, call)
 		}
-		return "", fmt.Errorf("unsupported tool: %s", call.Function.Name)
+		a.emitToolLifecycle(meta, "malformed", "unsupported tool", true)
+		return "", fmt.Errorf("%w: unsupported tool %s", ErrMalformedToolCall, toolName)
 	}
 }
 
@@ -1437,14 +1497,7 @@ func outputOrError(output string, execErr error) string {
 }
 
 func formatToolResult(toolName, output string, execErr error) string {
-	status := "completed"
-	if errors.Is(execErr, ErrPermissionDenied) {
-		status = "denied"
-	} else if errors.Is(execErr, ErrMalformedToolCall) {
-		status = "malformed"
-	} else if execErr != nil {
-		status = "failed"
-	}
+	status := toolExecutionStatus(execErr)
 	var lines []string
 	lines = append(lines, fmt.Sprintf("tool: %s", toolName))
 	lines = append(lines, fmt.Sprintf("status: %s", status))
@@ -1455,8 +1508,128 @@ func formatToolResult(toolName, output string, execErr error) string {
 	if execErr != nil {
 		lines = append(lines, "error:")
 		lines = append(lines, execErr.Error())
+		if recovery := toolRecoveryHint(execErr); recovery != "" {
+			lines = append(lines, "recovery:")
+			lines = append(lines, recovery)
+		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+func toolExecutionStatus(execErr error) string {
+	if errors.Is(execErr, ErrPermissionDenied) {
+		return "denied"
+	}
+	if errors.Is(execErr, ErrMalformedToolCall) {
+		return "malformed"
+	}
+	if execErr != nil {
+		return "failed"
+	}
+	return "completed"
+}
+
+func toolRecoveryHint(execErr error) string {
+	switch {
+	case errors.Is(execErr, ErrPermissionDenied):
+		return "Continue without this action, ask for approval again, or choose a safer tool."
+	case errors.Is(execErr, ErrMalformedToolCall):
+		return "Retry with a supported tool name and all required arguments."
+	case execErr != nil:
+		return "Adjust the arguments or choose a different tool before retrying."
+	default:
+		return ""
+	}
+}
+
+func nextUnproductiveToolLoops(current, totalCalls, successfulCalls int) int {
+	if totalCalls == 0 || successfulCalls > 0 {
+		return 0
+	}
+	return current + 1
+}
+
+func shouldStopAfterToolLoop(unproductiveLoops int) bool {
+	return unproductiveLoops >= 2
+}
+
+func validateToolCall(toolName string, args map[string]any, repoPath string) error {
+	if strings.TrimSpace(toolName) == "" {
+		return fmt.Errorf("%w: missing tool name", ErrMalformedToolCall)
+	}
+	resolvedRepoPath := strings.TrimSpace(repoPath)
+	requireString := func(key string) error {
+		value := strings.TrimSpace(stringArg(args, key, ""))
+		if value == "" {
+			return fmt.Errorf("%w: %s requires %q", ErrMalformedToolCall, toolName, key)
+		}
+		return nil
+	}
+	requirePathOrRepo := func(key string) error {
+		value := strings.TrimSpace(stringArg(args, key, resolvedRepoPath))
+		if value == "" {
+			return fmt.Errorf("%w: %s requires %q", ErrMalformedToolCall, toolName, key)
+		}
+		return nil
+	}
+	switch toolName {
+	case "get_status", "mcp_servers":
+		return nil
+	case "list_files", "read_file", "analyze_path", "diagnostics", "lsp_symbols":
+		return requirePathOrRepo("path")
+	case "write_file":
+		if err := requireString("path"); err != nil {
+			return err
+		}
+		if _, ok := args["content"]; !ok {
+			return fmt.Errorf("%w: %s requires %q", ErrMalformedToolCall, toolName, "content")
+		}
+		return nil
+	case "file_edit":
+		if err := requireString("path"); err != nil {
+			return err
+		}
+		if err := requireString("old_text"); err != nil {
+			return err
+		}
+		if _, ok := args["new_text"]; !ok {
+			return fmt.Errorf("%w: %s requires %q", ErrMalformedToolCall, toolName, "new_text")
+		}
+		return nil
+	case "apply_patch":
+		return requireString("patch")
+	case "shell_exec":
+		return requireString("command")
+	case "index_repo":
+		value := strings.TrimSpace(stringArg(args, "repo_path", resolvedRepoPath))
+		if value == "" {
+			return fmt.Errorf("%w: %s requires %q", ErrMalformedToolCall, toolName, "repo_path")
+		}
+		return nil
+	case "lsp_definition", "lsp_references":
+		if err := requirePathOrRepo("path"); err != nil {
+			return err
+		}
+		if intArg(args, "line", 0) < 1 {
+			return fmt.Errorf("%w: %s requires line >= 1", ErrMalformedToolCall, toolName)
+		}
+		if intArg(args, "character", 0) < 1 {
+			return fmt.Errorf("%w: %s requires character >= 1", ErrMalformedToolCall, toolName)
+		}
+		return nil
+	case "lsp_workspace_symbols", "lsp_workspace_definitions", "lsp_workspace_references":
+		if resolvedRepoPath == "" {
+			return fmt.Errorf("%w: %s requires an active repository", ErrMalformedToolCall, toolName)
+		}
+		return nil
+	case "run_subtask":
+		return requireString("prompt")
+	default:
+		if strings.HasPrefix(toolName, "mcp_") {
+			return nil
+		}
+		return fmt.Errorf("%w: unsupported tool %s", ErrMalformedToolCall, toolName)
+	}
 }
 
 func uniqueNonEmptyPaths(paths []string, fallback string) []string {
@@ -1597,6 +1770,9 @@ func (a *App) IndexRepository(ctx context.Context, repoPath string) error {
 		return err
 	}
 
+	symbolIndex := make(map[string][]indexedSymbol, len(files))
+	importIndex := make(map[string][]string, len(files))
+
 	for _, file := range files {
 		meta := fileMetadata(file)
 		_ = a.Neo4j.UpsertRepoFile(ctx, repoPath, file, meta)
@@ -1604,13 +1780,20 @@ func (a *App) IndexRepository(ctx context.Context, repoPath string) error {
 		if readErr == nil {
 			text := string(content)
 			imports := extractImports(file, text)
+			importIndex[file] = imports
+			symbols := a.loadIndexSymbols(ctx, file, repoPath, text)
+			symbolIndex[file] = symbols
 			_ = a.Neo4j.UpsertFileImports(ctx, file, imports)
-			_ = a.Neo4j.UpsertFileSymbols(ctx, file, extractSymbols(file, text))
-			for _, refFile := range resolveImportReferences(repoPath, file, imports, files) {
-				_ = a.Neo4j.LinkFileReference(ctx, file, refFile, "import")
-			}
+			_ = a.Neo4j.UpsertFileSymbols(ctx, file, symbolMetadata(symbols))
 		}
 	}
+
+	for _, file := range files {
+		for _, refFile := range resolveImportReferences(repoPath, file, importIndex[file], files) {
+			_ = a.Neo4j.LinkFileReference(ctx, file, refFile, "import")
+		}
+	}
+	a.indexLSPReferenceEdges(ctx, repoPath, symbolIndex)
 
 	a.Hub.Broadcast(events.Event{
 		Type: "repo.index.status",
@@ -1682,6 +1865,110 @@ func importCandidates(repoPath, sourceDir, value string) []string {
 		}
 	}
 	return candidates
+}
+
+func (a *App) loadIndexSymbols(ctx context.Context, path string, repoPath string, content string) []indexedSymbol {
+	lspSymbols, err := a.DocumentSymbols(ctx, path, repoPath)
+	if err == nil && len(lspSymbols) > 0 {
+		items := make([]indexedSymbol, 0, len(lspSymbols))
+		for _, item := range lspSymbols {
+			items = append(items, indexedSymbol{
+				Name:      item.Name,
+				Kind:      item.Kind,
+				Line:      item.Line,
+				Character: maxInt(item.Character, 1),
+			})
+		}
+		return items
+	}
+	extracted := extractSymbols(path, content)
+	items := make([]indexedSymbol, 0, len(extracted))
+	for _, item := range extracted {
+		items = append(items, indexedSymbol{
+			Name:      item.Name,
+			Kind:      item.Kind,
+			Line:      item.Line,
+			Character: 1,
+		})
+	}
+	return items
+}
+
+func symbolMetadata(items []indexedSymbol) []store.SymbolMetadata {
+	result := make([]store.SymbolMetadata, 0, len(items))
+	for _, item := range items {
+		result = append(result, store.SymbolMetadata{
+			Name: item.Name,
+			Kind: item.Kind,
+			Line: item.Line,
+		})
+	}
+	return result
+}
+
+func (a *App) indexLSPReferenceEdges(ctx context.Context, repoPath string, symbolIndex map[string][]indexedSymbol) {
+	if a.Neo4j == nil {
+		return
+	}
+	for file, symbols := range symbolIndex {
+		limit := minInt(len(symbols), 12)
+		for _, symbol := range symbols[:limit] {
+			definitions, err := a.Definitions(ctx, file, repoPath, symbol.Line, symbol.Character)
+			if err == nil {
+				a.linkSymbolLocations(ctx, file, symbol, definitions, "definition", symbolIndex)
+			}
+			references, err := a.References(ctx, file, repoPath, symbol.Line, symbol.Character)
+			if err == nil {
+				a.linkSymbolLocations(ctx, file, symbol, references, "reference", symbolIndex)
+			}
+		}
+	}
+}
+
+func (a *App) linkSymbolLocations(ctx context.Context, sourceFile string, source indexedSymbol, locations []lsp.Location, kind string, symbolIndex map[string][]indexedSymbol) {
+	for _, location := range locations {
+		targetPath := filepath.Clean(location.Path)
+		if targetPath == "" {
+			continue
+		}
+		if sourceFile == targetPath && absInt(source.Line-location.Line) <= 1 {
+			continue
+		}
+		target := nearestIndexedSymbol(symbolIndex[targetPath], location.Line)
+		targetName := ""
+		targetKind := ""
+		targetLine := location.Line
+		if target.Line > 0 {
+			targetName = target.Name
+			targetKind = target.Kind
+			targetLine = target.Line
+		}
+		_ = a.Neo4j.LinkFileReference(ctx, sourceFile, targetPath, "lsp_"+kind)
+		_ = a.Neo4j.LinkSymbolReference(ctx, sourceFile, source.Name, source.Kind, source.Line, targetPath, targetName, targetKind, targetLine, "lsp_"+kind)
+	}
+}
+
+func nearestIndexedSymbol(items []indexedSymbol, line int) indexedSymbol {
+	best := indexedSymbol{}
+	bestDistance := int(^uint(0) >> 1)
+	for _, item := range items {
+		distance := absInt(item.Line - line)
+		if distance < bestDistance {
+			best = item
+			bestDistance = distance
+		}
+	}
+	if bestDistance > 8 {
+		return indexedSymbol{Line: line, Character: 1}
+	}
+	return best
+}
+
+func absInt(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
 }
 
 func (a *App) Status(ctx context.Context) Status {
